@@ -1,0 +1,49 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: medix-java
+  datasource:
+    url: ${MEDIX_DB_URL:jdbc:postgresql://localhost:5432/postgres}
+    username: ${MEDIX_DB_USERNAME:postgres}
+    password: ${MEDIX_DB_PASSWORD:123456}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: ${MEDIX_REDIS_HOST:localhost}
+      port: ${MEDIX_REDIS_PORT:6379}
+      password: ${MEDIX_REDIS_PASSWORD:}
+  ai:
+    openai:
+      api-key: ${MEDIX_OPENAI_API_KEY:}
+      base-url: ${MEDIX_OPENAI_BASE_URL:https://ark.cn-beijing.volces.com/api/v3}
+      chat:
+        options:
+          model: ${MEDIX_OPENAI_MODEL:doubao-seed-1-6-flash-250828}
+          temperature: 0.7
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+medix:
+  agent:
+    max-iterations: 5
+    max-skill-calls: 3
+    single-agent-timeout: 15s
+    swarm-timeout: 30s
+  features:
+    live-llm: ${MEDIX_LIVE_LLM:false}
+    redis: ${MEDIX_REDIS_ENABLED:true}
+    minio: ${MEDIX_MINIO_ENABLED:false}
+    reranker: ${MEDIX_RERANKER_ENABLED:true}
+  services:
+    reranker-url: ${MEDIX_RERANKER_URL:http://localhost:8081/rerank}
+    minio-endpoint: ${MEDIX_MINIO_ENDPOINT:http://localhost:9000}
+    minio-access-key: ${MEDIX_MINIO_ACCESS_KEY:minioadmin}
+    minio-secret-key: ${MEDIX_MINIO_SECRET_KEY:minioadmin123}
