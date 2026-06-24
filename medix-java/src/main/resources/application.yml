@@ -44,6 +44,15 @@ medix:
     max-skill-calls: 3
     single-agent-timeout: 15s
     swarm-timeout: 30s
+  memory:
+    redis-context-ttl: ${MEDIX_REDIS_CONTEXT_TTL:2h}
+    entropy:
+      enabled: ${MEDIX_MEMORY_ENTROPY_ENABLED:true}
+      recent-message-limit: ${MEDIX_MEMORY_RECENT_MESSAGE_LIMIT:10}
+      medium-message-threshold: ${MEDIX_MEMORY_MEDIUM_MESSAGE_THRESHOLD:20}
+      high-message-threshold: ${MEDIX_MEMORY_HIGH_MESSAGE_THRESHOLD:50}
+      duplicate-rate-threshold: ${MEDIX_MEMORY_DUPLICATE_RATE_THRESHOLD:0.2}
+      average-length-threshold: ${MEDIX_MEMORY_AVERAGE_LENGTH_THRESHOLD:1000}
   features:
     live-llm: ${MEDIX_LIVE_LLM:false}
     redis: ${MEDIX_REDIS_ENABLED:true}
