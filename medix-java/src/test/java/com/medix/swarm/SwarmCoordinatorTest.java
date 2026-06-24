@@ -3,6 +3,7 @@ package com.medix.swarm;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.medix.agent.AgentLoopEngine;
+import com.medix.agent.AgentDelegationRequest;
 import com.medix.agent.AgentRequest;
 import com.medix.agent.AgentResult;
 import com.medix.agent.ConsultationAgent;
@@ -110,6 +111,58 @@ class SwarmCoordinatorTest {
         assertThat(response.sharedContext()).containsEntry("contribution.2.agent", "research_agent");
     }
 
+    @Test
+    void executesDelegatedResearchSubtaskInsteadOfFailingSwarm() {
+        LeadAgent leadAgent = new LeadAgent((agentId, prompt, skillMetadata) -> """
+                {"subtasks":[{"description":"assess chest pain risk","assigned_agent":"diagnostic_agent"}]}
+                """);
+        SharedContextStore sharedContextStore = new SharedContextStore();
+        SwarmCoordinator coordinator = new SwarmCoordinator(
+                new SwarmRouter(),
+                new CapturingConsultationAgent("consultation_agent"),
+                new DelegatingDiagnosticAgent(),
+                new CapturingResearchAgent("research_agent"),
+                leadAgent,
+                sharedContextStore
+        );
+
+        SwarmResponse response = coordinator.processDetailed(new AgentRequest(
+                "chest pain and breathing difficulty needs guideline evidence",
+                "delegated-swarm",
+                Map.of()
+        ));
+
+        assertThat(response.answer()).contains("research_agent handled: perform deep research");
+        assertThat(response.agentResults()).extracting(AgentResult::agentId).contains("research_agent");
+        assertThat(response.sharedContext()).containsEntry("subtask.1.status", "delegated");
+        assertThat(response.sharedContext()).containsValue("research_agent");
+    }
+
+    @Test
+    void returnsPartialSwarmAnswerWhenOneWorkerFails() {
+        LeadAgent leadAgent = new LeadAgent((agentId, prompt, skillMetadata) -> """
+                {"subtasks":[
+                  {"description":"provide lifestyle advice","assigned_agent":"consultation_agent"},
+                  {"description":"perform deep research","assigned_agent":"research_agent"}
+                ]}
+                """);
+        SharedContextStore sharedContextStore = new SharedContextStore();
+        SwarmCoordinator coordinator = new SwarmCoordinator(
+                new SwarmRouter(),
+                new CapturingConsultationAgent("consultation_agent"),
+                new CapturingDiagnosticAgent("diagnostic_agent"),
+                new FailingResearchAgent(),
+                leadAgent,
+                sharedContextStore
+        );
+
+        SwarmResponse response = coordinator.processDetailed(new AgentRequest("hypertension management and evidence", "partial-failure", Map.of()));
+
+        assertThat(response.answer()).contains("consultation_agent handled: provide lifestyle advice");
+        assertThat(response.answer()).contains("research_agent 暂时无法完成");
+        assertThat(response.sharedContext()).containsEntry("subtask.2.status", "failed");
+    }
+
     private static class CapturingConsultationAgent extends ConsultationAgent {
         private final String agentId;
 
@@ -164,6 +217,28 @@ class SwarmCoordinatorTest {
         @Override
         public AgentResult answer(AgentRequest request) {
             return result(agentId, request);
+        }
+    }
+
+    private static class DelegatingDiagnosticAgent extends DiagnosticAgent {
+        DelegatingDiagnosticAgent() {
+            super(null);
+        }
+
+        @Override
+        public AgentResult answer(AgentRequest request) {
+            throw new AgentDelegationRequest("diagnostic_agent", "research_agent", "perform deep research");
+        }
+    }
+
+    private static class FailingResearchAgent extends ResearchAgent {
+        FailingResearchAgent() {
+            super(null);
+        }
+
+        @Override
+        public AgentResult answer(AgentRequest request) {
+            throw new IllegalStateException("provider timeout");
         }
     }
 

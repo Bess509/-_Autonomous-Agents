@@ -2,6 +2,7 @@ package com.medix.swarm;
 
 import com.medix.agent.AgentRequest;
 import com.medix.agent.AgentResult;
+import com.medix.agent.AgentDelegationRequest;
 import com.medix.agent.ConsultationAgent;
 import com.medix.agent.DiagnosticAgent;
 import com.medix.agent.LeadAgent;
@@ -94,12 +95,29 @@ public class SwarmCoordinator {
                 request.sessionId(),
                 subtaskContext(request, assignedSubtask)
         );
-        AgentResult result = runAgent(subtaskRequest, agent);
-        sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".status", "completed");
-        sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".result", result.answer());
-        sharedContextStore.put(request.sessionId(), "contribution." + assignedSubtask.id() + ".agent", result.agentId());
-        sharedContextStore.put(request.sessionId(), "contribution." + assignedSubtask.id() + ".answer", result.answer());
-        return result;
+        try {
+            AgentResult result = runAgent(subtaskRequest, agent);
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".status", "completed");
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".result", result.answer());
+            sharedContextStore.put(request.sessionId(), "contribution." + assignedSubtask.id() + ".agent", result.agentId());
+            sharedContextStore.put(request.sessionId(), "contribution." + assignedSubtask.id() + ".answer", result.answer());
+            return result;
+        } catch (AgentDelegationRequest delegation) {
+            sharedContextStore.put(request.sessionId(), agent.agentId() + ".status", "delegated");
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".status", "delegated");
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".delegatedTo", delegation.targetAgent());
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".delegatedTask", delegation.task());
+            return runDelegatedSubtask(request, assignedSubtask, delegation);
+        } catch (RuntimeException exception) {
+            sharedContextStore.put(request.sessionId(), agent.agentId() + ".status", "failed");
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".status", "failed");
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".error", exception.getClass().getSimpleName());
+            AgentResult result = degradedResult(agent.agentId());
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".result", result.answer());
+            sharedContextStore.put(request.sessionId(), "contribution." + assignedSubtask.id() + ".agent", result.agentId());
+            sharedContextStore.put(request.sessionId(), "contribution." + assignedSubtask.id() + ".answer", result.answer());
+            return result;
+        }
     }
 
     private AgentResult runAgent(AgentRequest request, MedicalAgent agent) {
@@ -130,6 +148,49 @@ public class SwarmCoordinator {
                 "lead_agent",
                 requiredAgents,
                 "lead_agent_multi_subtask"
+        );
+    }
+
+    private AgentResult runDelegatedSubtask(
+            AgentRequest request,
+            SwarmSubtask sourceSubtask,
+            AgentDelegationRequest delegation
+    ) {
+        MedicalAgent targetAgent = agentById(delegation.targetAgent());
+        if (targetAgent == null || delegation.targetAgent().equals(sourceSubtask.assignedAgent())) {
+            return degradedResult(delegation.sourceAgent());
+        }
+        if (targetAgentAlreadyAssigned(request.sessionId(), delegation.targetAgent())) {
+            return new AgentResult(
+                    delegation.sourceAgent(),
+                    "已将超出当前能力边界的部分交由 " + delegation.targetAgent() + " 处理。",
+                    1,
+                    List.of()
+            );
+        }
+        SwarmSubtask delegatedSubtask = new SwarmSubtask(
+                sourceSubtask.id() + "-delegated",
+                delegation.task(),
+                delegation.targetAgent()
+        );
+        sharedContextStore.put(request.sessionId(), "subtask." + delegatedSubtask.id() + ".description", delegatedSubtask.description());
+        sharedContextStore.put(request.sessionId(), "subtask." + delegatedSubtask.id() + ".assignedAgent", delegatedSubtask.assignedAgent());
+        sharedContextStore.put(request.sessionId(), "subtask." + delegatedSubtask.id() + ".delegatedFrom", sourceSubtask.id());
+        sharedContextStore.put(request.sessionId(), "subtask." + delegatedSubtask.id() + ".status", "pending");
+        return runSubtask(request, delegatedSubtask);
+    }
+
+    private boolean targetAgentAlreadyAssigned(String sessionId, String targetAgent) {
+        return sharedContextStore.entries(sessionId).entrySet().stream()
+                .anyMatch(entry -> entry.getKey().endsWith(".assignedAgent") && targetAgent.equals(entry.getValue()));
+    }
+
+    private AgentResult degradedResult(String agentId) {
+        return new AgentResult(
+                agentId,
+                agentId + " 暂时无法完成该子任务，系统将基于其他可用信息继续给出安全建议。",
+                0,
+                List.of()
         );
     }
 

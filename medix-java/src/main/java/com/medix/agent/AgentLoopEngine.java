@@ -1,5 +1,6 @@
 package com.medix.agent;
 
+import com.medix.harness.HarnessValidator;
 import com.medix.harness.OutputRepairService;
 import com.medix.memory.ChatMessage;
 import com.medix.memory.ShortTermMemory;
@@ -18,6 +19,7 @@ public class AgentLoopEngine {
     private final ShortTermMemory memory;
     private final OutputRepairService repairService;
     private final ModelGateway modelGateway;
+    private final HarnessValidator harnessValidator;
     private final int maxIterations;
     private final int maxSkillCalls;
 
@@ -26,9 +28,10 @@ public class AgentLoopEngine {
             SkillRegistry skillRegistry,
             ShortTermMemory memory,
             OutputRepairService repairService,
-            ModelGateway modelGateway
+            ModelGateway modelGateway,
+            HarnessValidator harnessValidator
     ) {
-        this(skillRegistry, memory, repairService, modelGateway, 5, 3);
+        this(skillRegistry, memory, repairService, modelGateway, harnessValidator, 5, 3);
     }
 
     public AgentLoopEngine(
@@ -38,7 +41,7 @@ public class AgentLoopEngine {
             int maxIterations,
             int maxSkillCalls
     ) {
-        this(skillRegistry, memory, repairService, new FakeModelGateway(), maxIterations, maxSkillCalls);
+        this(skillRegistry, memory, repairService, new FakeModelGateway(), new HarnessValidator(), maxIterations, maxSkillCalls);
     }
 
     public AgentLoopEngine(
@@ -49,10 +52,23 @@ public class AgentLoopEngine {
             int maxIterations,
             int maxSkillCalls
     ) {
+        this(skillRegistry, memory, repairService, modelGateway, new HarnessValidator(), maxIterations, maxSkillCalls);
+    }
+
+    public AgentLoopEngine(
+            SkillRegistry skillRegistry,
+            ShortTermMemory memory,
+            OutputRepairService repairService,
+            ModelGateway modelGateway,
+            HarnessValidator harnessValidator,
+            int maxIterations,
+            int maxSkillCalls
+    ) {
         this.skillRegistry = skillRegistry;
         this.memory = memory;
         this.repairService = repairService;
         this.modelGateway = modelGateway;
+        this.harnessValidator = harnessValidator;
         this.maxIterations = maxIterations;
         this.maxSkillCalls = maxSkillCalls;
     }
@@ -67,13 +83,24 @@ public class AgentLoopEngine {
         while (iterations < maxIterations && answer == null) {
             iterations++;
             String prompt = buildPrompt(request, observations);
-            String decision = normalizeDecision(modelGateway.complete(agentId, prompt, skillRegistry.metadata()));
+            Map<String, String> visibleSkills = harnessValidator.visibleSkillMetadata(agentId, skillRegistry.metadata());
+            String decision = normalizeDecision(modelGateway.complete(agentId, prompt, visibleSkills));
             if (decision.startsWith("CALL_SKILL:")) {
                 if (skillCalls.size() >= maxSkillCalls) {
                     answer = fallbackAnswer("已达到工具调用上限", observations);
                     break;
                 }
                 String skillName = parseSkillName(decision);
+                if (!harnessValidator.canUseSkill(agentId, skillName)) {
+                    if ("clinical_guideline".equals(skillName) || "deep_research".equals(skillName)) {
+                        throw new AgentDelegationRequest(
+                                agentId,
+                                "research_agent",
+                                "需要由 research_agent 调用 " + skillName + " 完成循证分析"
+                        );
+                    }
+                    throw new IllegalStateException("Agent " + agentId + " cannot use skill " + skillName);
+                }
                 SkillResult result = skillRegistry.invoke(skillName, new SkillRequest(request.question(), request.sessionId(), request.context()));
                 skillCalls.add(skillName);
                 observations.add(formatObservation(observations.size() + 1, result));
@@ -81,6 +108,9 @@ public class AgentLoopEngine {
                     answer = fallbackAnswer("已达到工具调用上限", observations);
                 }
                 continue;
+            }
+            if (decision.startsWith("DELEGATE_AGENT:")) {
+                throw parseDelegation(agentId, decision);
             }
             if (decision.startsWith("FINAL:")) {
                 answer = stripFinalPrefix(decision);
@@ -129,6 +159,20 @@ public class AgentLoopEngine {
             skillName = skillName.substring(0, lineBreak).trim();
         }
         return skillName;
+    }
+
+    private AgentDelegationRequest parseDelegation(String sourceAgent, String decision) {
+        String payload = decision.substring("DELEGATE_AGENT:".length()).trim();
+        String[] parts = payload.split(":", 2);
+        String targetAgent = parts.length > 0 ? parts[0].trim() : "";
+        String task = parts.length > 1 ? parts[1].trim() : "";
+        if (targetAgent.isBlank()) {
+            targetAgent = "consultation_agent";
+        }
+        if (task.isBlank()) {
+            task = "继续处理超出当前 Agent 能力边界的部分";
+        }
+        return new AgentDelegationRequest(sourceAgent, targetAgent, task);
     }
 
     private String stripFinalPrefix(String answer) {

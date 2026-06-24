@@ -5,8 +5,8 @@ medix:
         allowedSkills: [search_knowledge, recommend_lifestyle, assess_risk]
         forbiddenActions: [diagnose_disease, prescribe_medication, guarantee_cure]
       diagnostic_agent:
-        allowedSkills: [assess_risk, analyze_symptoms, disease_code, clinical_guideline]
+        allowedSkills: [assess_risk, analyze_symptoms, disease_code]
         forbiddenActions: [give_definitive_diagnosis, suggest_self_treatment]
       research_agent:
-        allowedSkills: [clinical_guideline, deep_research, search_knowledge]
+        allowedSkills: [clinical_guideline, deep_research]
         forbiddenActions: [give_diagnosis, recommend_treatment]

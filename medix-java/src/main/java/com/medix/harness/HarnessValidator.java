@@ -30,6 +30,20 @@ public class HarnessValidator {
         return allowedSkills.getOrDefault(agentId, Set.of(skillName)).contains(skillName);
     }
 
+    public Map<String, String> visibleSkillMetadata(String agentId, Map<String, String> metadata) {
+        Set<String> allowed = allowedSkills.get(agentId);
+        if (allowed == null || allowed.isEmpty()) {
+            return Map.copyOf(metadata);
+        }
+        Map<String, String> visible = new LinkedHashMap<>();
+        metadata.forEach((name, description) -> {
+            if (allowed.contains(name)) {
+                visible.put(name, description);
+            }
+        });
+        return Map.copyOf(visible);
+    }
+
     public Set<String> violations(String agentId, Iterable<String> skillCalls) {
         Set<String> allowed = allowedSkills.get(agentId);
         if (allowed == null) {
@@ -47,8 +61,8 @@ public class HarnessValidator {
     private static Map<String, Set<String>> defaults() {
         return Map.of(
                 "consultation_agent", Set.of("search_knowledge", "recommend_lifestyle", "assess_risk"),
-                "diagnostic_agent", Set.of("assess_risk", "analyze_symptoms", "disease_code", "clinical_guideline"),
-                "research_agent", Set.of("clinical_guideline", "deep_research", "search_knowledge")
+                "diagnostic_agent", Set.of("assess_risk", "analyze_symptoms", "disease_code"),
+                "research_agent", Set.of("clinical_guideline", "deep_research")
         );
     }
 
