@@ -1,159 +1,180 @@
-# MediX Java
+# MediX Java 医疗助手 Agent 系统
 
-MediX Java is a Spring Boot medical QA platform that demonstrates a Skills-Agent architecture, Agent Swarm routing, ReAct-style agent loops, short-term and long-term memory, RAG retrieval, and runtime output repair.
+MediX Java 是一个基于 Spring Boot 的多 Agent 医疗问答平台，围绕健康咨询、症状诊断和医学研究三个专业 Agent，提供 ReAct 工具调用循环、Swarm 协作路由、短期/长期记忆、RAG 检索和医疗输出修复能力。
 
-## Stack
+> 本项目用于医疗问答系统工程实践演示，输出内容仅供学习和参考，不能替代专业医生诊断。
+
+## 技术栈
 
 - Java 21
 - Spring Boot 4.1.0
-- Spring AI 2.0.0 OpenAI-compatible chat client and pgvector starter
-- spring-ai-agent-utils 0.10.0 for progressive skill disclosure
-- LangChain4j 1.16.3 data segment model for local RAG chunks
-- PostgreSQL + pgvector for long-term memory
-- Redis for shared Swarm task context, with local fallback
-- MinIO for optional answer archive storage
-- Optional local reranker HTTP service
+- Spring AI 2.0 OpenAI-compatible Chat Client
+- spring-ai-agent-utils 0.10.0
+- LangChain4j 1.16.3
+- PostgreSQL + pgvector
+- Redis
+- Maven
 
-## Architecture
+## 核心能力
+
+- **Skills-Agent 解耦**：实现知识检索、风险评估、症状分析、生活方式建议、ICD-10 编码、临床指南、深度研究 7 个原子 Skills，并通过 `SkillRegistry` 统一注册执行。
+- **多 Agent 协作**：实现健康咨询、症状诊断、医学研究 3 个 Worker Agent，以及负责任务拆解和汇总的 `LeadAgent`。
+- **ReAct Agent Loop**：自研 `AgentLoopEngine` 支持 `Think -> Act -> Observe` 工具调用循环，并通过 `maxIterations`、`maxSkillCalls` 防止无限调用。
+- **Swarm 路由**：简单问题走单 Agent 快速通道，复杂/高危/循证类问题由 `SwarmCoordinator` 拆解为多个子任务，并通过 `CompletableFuture` 并行执行。
+- **记忆管理**：短期记忆通过 `ShortTermMemory` 维护会话上下文，长期记忆通过 PostgreSQL + pgvector 存储会话摘要并支持相似案例召回。
+- **Harness 约束与输出修复**：通过 YAML 配置限制不同 Agent 的可调用 Skills，并使用 AOP 校验实际调用；`OutputRepairService` 自动补全免责声明、高危就医提醒和修正绝对化诊断表述。
+
+## 架构概览
 
 ```mermaid
 flowchart LR
-    API["REST API"] --> Router["SwarmRouter"]
-    Router --> Single["Single Agent Path"]
-    Router --> Swarm["Swarm Coordinator"]
-    Swarm --> C["consultation_agent"]
-    Swarm --> D["diagnostic_agent"]
-    Swarm --> R["research_agent"]
-    C --> Skills["7 Atomic Skills"]
-    D --> Skills
-    R --> Skills
-    Skills --> RAG["Bundled RAG + Reranker"]
-    Swarm --> Redis["Redis Shared Context"]
-    API --> Memory["PostgreSQL + pgvector Long-Term Memory"]
-    API --> MinIO["Optional MinIO Archive"]
-    API --> Eval["Evaluation Metrics"]
+    User["User"] --> API["Chat API"]
+    API --> Coordinator["SwarmCoordinator"]
+    Coordinator --> Lead["LeadAgent"]
+    Coordinator --> C["ConsultationAgent"]
+    Coordinator --> D["DiagnosticAgent"]
+    Coordinator --> R["ResearchAgent"]
+    C --> Loop["AgentLoopEngine"]
+    D --> Loop
+    R --> Loop
+    Loop --> Registry["SkillRegistry"]
+    Registry --> Skills["7 Atomic Skills"]
+    Skills --> RAG["Local Knowledge / RAG"]
+    Coordinator --> Shared["SharedContextStore<br/>Redis + Local Fallback"]
+    API --> STM["ShortTermMemory"]
+    API --> LTM["LongTermMemory<br/>PostgreSQL + pgvector"]
+    Loop --> Repair["OutputRepairService"]
 ```
 
-## Implemented Highlights
+## Agent 与 Skill 边界
 
-- 7 atomic skills: knowledge retrieval, risk assessment, symptom analysis, lifestyle advice, ICD-10 reference, clinical guideline, deep research.
-- 3 professional agents: health consultation, symptom diagnosis, medical research.
-- Agent Swarm routing: simple questions use the single-agent path; complex, high-risk, or evidence-oriented questions fan out with `CompletableFuture`.
-- Agent loop: a bounded Think-Act-Observe cycle where the model can call skills, observe their results, continue reasoning, and stop with `FINAL:<answer>` under max iteration and max skill-call guards.
-- Short-term memory: shared session memory with window reduction and deduplication.
-- Memory entropy management: automatic MD5 deduplication, sliding-window compression, entropy estimation, and high-entropy warning logs.
-- Long-term memory: conversation summaries persisted to `conversation_summaries` with pgvector embeddings.
-- Harness constraints: YAML-bound agent skill boundaries plus Spring AOP runtime validation.
-- Output repair: Spring AI `BeanOutputConverter` format support plus automatic disclaimer and urgent-care warning.
-- Progressive disclosure: skill docs under `src/main/resources/skills/*/SKILL.md` loaded through `spring-ai-agent-utils`.
+| Agent | 定位 | 允许调用的 Skills |
+| --- | --- | --- |
+| `consultation_agent` | 健康咨询、常见病科普、生活方式建议 | `search_knowledge`, `recommend_lifestyle`, `assess_risk` |
+| `diagnostic_agent` | 症状分析、风险分层、诊断参考 | `assess_risk`, `analyze_symptoms`, `disease_code` |
+| `research_agent` | 临床指南、医学证据、深度研究 | `clinical_guideline`, `deep_research` |
 
-## Local Defaults
+当某个 Agent 需要调用超出自身边界的能力时，系统会通过 `DELEGATE_AGENT:<agent_id>:<task>` 协议将任务委派给合适的 Agent，避免越权调用导致请求失败。
 
-The default configuration matches the local services described for this workspace:
+## 目录结构
 
-```yaml
-PostgreSQL: jdbc:postgresql://localhost:5432/postgres
-Username: postgres
-Password: 123456
-Redis: localhost:6379
-Redis password: 123321
-MinIO: http://localhost:9000
-Reranker: http://localhost:8081/rerank
+```text
+medix-java/
+├── src/main/java/com/medix/agent      # Agent、LeadAgent、AgentLoopEngine
+├── src/main/java/com/medix/skill      # 7 个原子 Skills 与 SkillRegistry
+├── src/main/java/com/medix/swarm      # Swarm 路由、并行调度、共享上下文
+├── src/main/java/com/medix/memory     # 短期记忆、长期记忆、向量召回
+├── src/main/java/com/medix/harness    # Agent 能力边界与输出修复
+├── src/main/java/com/medix/rag        # 本地知识库检索
+├── src/main/resources/agents          # Agent/Swarm YAML 约束
+├── src/main/resources/skills          # SKILL.md 技能描述
+└── src/test/java/com/medix            # 单元测试与 API smoke 测试
 ```
 
-MinIO is disabled by default. Redis and reranker are enabled in configuration but gracefully fall back when unavailable.
+## 本地运行
 
-## Run
+进入 Java 项目目录：
+
+```bash
+cd medix-java
+```
+
+运行测试：
 
 ```bash
 mvn test
-mvn spring-boot:run
 ```
 
-Useful environment overrides:
-
-```bash
-MEDIX_DB_URL=jdbc:postgresql://localhost:5432/postgres
-MEDIX_DB_USERNAME=postgres
-MEDIX_DB_PASSWORD=123456
-MEDIX_OPENAI_API_KEY=your-key
-MEDIX_OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-MEDIX_OPENAI_MODEL=doubao-seed-1-6-flash-250828
-MEDIX_LIVE_LLM=true
-MEDIX_REDIS_ENABLED=true
-MEDIX_REDIS_PASSWORD=123321
-MEDIX_REDIS_HEALTH_ENABLED=false
-MEDIX_REDIS_CONTEXT_TTL=2h
-MEDIX_MEMORY_ENTROPY_ENABLED=true
-MEDIX_MEMORY_RECENT_MESSAGE_LIMIT=10
-MEDIX_MINIO_ENABLED=true
-MEDIX_RERANKER_ENABLED=true
-```
-
-PostgreSQL needs the `vector` extension available for Flyway migration:
+启动完整服务前，需要准备 PostgreSQL，并启用 pgvector：
 
 ```sql
 create extension if not exists vector;
 ```
 
-## API
-
-Ask a medical question:
+启动服务：
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/chat ^
-  -H "Content-Type: application/json" ^
-  -d "{\"sessionId\":\"demo-1\",\"question\":\"52岁男性高血压多年，胸痛、呼吸困难，想了解指南证据\",\"context\":{\"age\":52}}"
+mvn spring-boot:run
 ```
 
-Search bundled knowledge:
+默认情况下 `MEDIX_LIVE_LLM=false`，系统使用 `FakeModelGateway`，不需要大模型 API Key 也可以跑通本地逻辑和测试。
+
+## 真实 LLM 配置
+
+如果需要接入 OpenAI-compatible 模型服务，设置以下环境变量：
 
 ```bash
-curl "http://localhost:8080/api/v1/knowledge/search?q=胸痛%20呼吸困难&limit=3"
+MEDIX_LIVE_LLM=true
+MEDIX_OPENAI_API_KEY=your-key
+MEDIX_OPENAI_BASE_URL=https://api.example.com
+MEDIX_OPENAI_MODEL=your-model
 ```
 
-List skills and agent boundaries:
+可选中间件配置：
+
+```bash
+MEDIX_DB_URL=jdbc:postgresql://localhost:5432/postgres
+MEDIX_DB_USERNAME=postgres
+MEDIX_DB_PASSWORD=your-password
+MEDIX_REDIS_ENABLED=true
+MEDIX_REDIS_HOST=localhost
+MEDIX_REDIS_PORT=6379
+MEDIX_REDIS_PASSWORD=your-redis-password
+MEDIX_RERANKER_ENABLED=false
+MEDIX_MINIO_ENABLED=false
+```
+
+## API 示例
+
+医疗问答：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId": "demo-1",
+    "question": "52岁男性，高血压多年，今天出现胸痛和呼吸困难，想了解可能风险、临床指南证据以及下一步应该怎么办。",
+    "context": {
+      "age": 52,
+      "sex": "male"
+    }
+  }'
+```
+
+查看 Skill 与 Agent 边界：
 
 ```bash
 curl http://localhost:8080/api/v1/skills
 ```
 
-Show evaluation summary:
+查看评测摘要：
 
 ```bash
 curl http://localhost:8080/api/v1/evaluation/summary
 ```
 
-Show short-term memory entropy for a session:
+查看短期记忆熵：
 
 ```bash
 curl http://localhost:8080/api/v1/memory/entropy/demo-1
 ```
 
-## Key Packages
+## 测试覆盖
 
-- `com.medix.agent`: model gateway, ReAct loop, professional agents.
-- `com.medix.skill`: atomic skills, registry, progressive disclosure.
-- `com.medix.swarm`: routing, parallel coordinator, Redis-backed shared context.
-- `com.medix.rag`: local knowledge base and reranker adapter.
-- `com.medix.memory`: short-term reducer and pgvector long-term memory.
-- `com.medix.harness`: YAML constraints, AOP guard, output repair.
-- `com.medix.api`: REST API.
+当前测试覆盖重点：
 
-## Verification
+- 7 个原子 Skills 与 `SkillRegistry`
+- ReAct 多轮工具调用、最大迭代限制、最大工具调用限制
+- Agent 能力边界过滤、越权调用委派
+- LeadAgent 任务拆解与 SwarmCoordinator 并行执行
+- Redis 共享上下文 fallback
+- 短期记忆窗口压缩、去重、记忆熵监控
+- PostgreSQL + pgvector 长期记忆召回
+- Harness AOP 校验与 OutputRepairService 输出修复
+- `/api/v1/chat` 与 `/api/v1/skills` smoke 测试
 
-Current smoke coverage:
+## 说明
 
-- Spring context startup
-- skill registry and all 7 skills
-- short-term memory reducer
-- output repair
-- router and Swarm coordinator
-- real HTTP smoke tests for `/api/v1/chat` and `/api/v1/skills`
-- memory entropy manager, short-term memory auto-clean, Redis TTL, and `/api/v1/memory/entropy/{sessionId}`
-
-Run all tests:
-
-```bash
-mvn test
-```
+- 仓库中的 Java 项目不依赖 `.claude` 或 Python 原项目目录。
+- 未配置真实大模型 API Key 时，系统会使用本地 Fake LLM 路径，便于测试和演示。
+- 医疗回答会自动追加免责声明；出现胸痛、呼吸困难等高危症状时会补充及时就医提醒。
