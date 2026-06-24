@@ -31,7 +31,7 @@ public class MessageWindowReducer {
                 .reduce("", (left, right) -> left + " " + right)
                 .trim();
         List<ChatMessage> reduced = new ArrayList<>();
-        reduced.add(new ChatMessage("system", "历史摘要：" + abbreviate(summary, 260)));
+        reduced.add(new ChatMessage("system", "Conversation summary: " + abbreviate(summary, 260)));
         reduced.addAll(recent);
         return reduced;
     }
