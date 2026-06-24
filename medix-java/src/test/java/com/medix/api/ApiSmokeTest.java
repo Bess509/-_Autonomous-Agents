@@ -24,16 +24,17 @@ class ApiSmokeTest {
     private int port;
 
     @Test
-    void chatEndpointReturnsSwarmAnswer() throws Exception {
+    void chatEndpointReturnsSwarmAnswerAndMemoryEntropyMetrics() throws Exception {
+        String question = "chest pain breathing difficulty with research context and repeated follow up";
         HttpRequest request = HttpRequest.newBuilder(uri("/api/v1/chat"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString("""
                         {
                           "sessionId": "api-test",
-                          "question": "胸痛 呼吸困难 高血压 指南",
+                          "question": "%s",
                           "context": {"age": 52}
                         }
-                        """))
+                        """.formatted(question)))
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -42,6 +43,21 @@ class ApiSmokeTest {
         assertThat(response.body()).contains("\"routeMode\":\"SWARM\"");
         assertThat(response.body()).contains("\"primaryAgent\":\"lead_agent\"");
         assertThat(response.body()).contains("\"answer\"");
+
+        HttpRequest entropyRequest = HttpRequest.newBuilder(uri("/api/v1/memory/entropy/api-test")).GET().build();
+        HttpResponse<String> entropyResponse = httpClient.send(entropyRequest, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(entropyResponse.statusCode()).isEqualTo(200);
+        assertThat(entropyResponse.body()).contains("totalMessages");
+        assertThat(entropyResponse.body()).contains("entropyLevel");
+        assertThat(entropyResponse.body()).doesNotContain(question);
+
+        HttpRequest evaluationRequest = HttpRequest.newBuilder(uri("/api/v1/evaluation/summary")).GET().build();
+        HttpResponse<String> evaluationResponse = httpClient.send(evaluationRequest, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(evaluationResponse.statusCode()).isEqualTo(200);
+        assertThat(evaluationResponse.body()).contains("memoryEntropy");
+        assertThat(evaluationResponse.body()).contains("trackedSessions");
     }
 
     @Test

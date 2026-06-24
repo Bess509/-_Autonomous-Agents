@@ -1,5 +1,6 @@
 package com.medix.evaluation;
 
+import com.medix.memory.ShortTermMemory;
 import com.medix.swarm.RouteMode;
 import com.medix.swarm.SwarmResponse;
 import java.util.Map;
@@ -12,6 +13,11 @@ public class EvaluationService {
     private final AtomicLong singleAgentRequests = new AtomicLong();
     private final AtomicLong swarmRequests = new AtomicLong();
     private final AtomicLong totalLatencyMs = new AtomicLong();
+    private final ShortTermMemory shortTermMemory;
+
+    public EvaluationService(ShortTermMemory shortTermMemory) {
+        this.shortTermMemory = shortTermMemory;
+    }
 
     public void record(SwarmResponse response, long latencyMs) {
         totalRequests.incrementAndGet();
@@ -38,7 +44,8 @@ public class EvaluationService {
                         "singleAgentLatency", "5-15s",
                         "swarmLatency", "20-30s",
                         "contextUnderstanding", "92%"
-                )
+                ),
+                "memoryEntropy", shortTermMemory.entropyOverview()
         );
     }
 }
