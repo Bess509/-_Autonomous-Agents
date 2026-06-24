@@ -41,6 +41,7 @@ flowchart LR
 - Agent Swarm routing: simple questions use the single-agent path; complex, high-risk, or evidence-oriented questions fan out with `CompletableFuture`.
 - Agent loop: model output chooses `CALL_SKILL:<name>` or `FINAL:<answer>`, with max iteration and max skill-call guards.
 - Short-term memory: shared session memory with window reduction and deduplication.
+- Memory entropy management: automatic MD5 deduplication, sliding-window compression, entropy estimation, and high-entropy warning logs.
 - Long-term memory: conversation summaries persisted to `conversation_summaries` with pgvector embeddings.
 - Harness constraints: YAML-bound agent skill boundaries plus Spring AOP runtime validation.
 - Output repair: Spring AI `BeanOutputConverter` format support plus automatic disclaimer and urgent-care warning.
@@ -82,6 +83,9 @@ MEDIX_LIVE_LLM=true
 MEDIX_REDIS_ENABLED=true
 MEDIX_REDIS_PASSWORD=123321
 MEDIX_REDIS_HEALTH_ENABLED=false
+MEDIX_REDIS_CONTEXT_TTL=2h
+MEDIX_MEMORY_ENTROPY_ENABLED=true
+MEDIX_MEMORY_RECENT_MESSAGE_LIMIT=10
 MEDIX_MINIO_ENABLED=true
 MEDIX_RERANKER_ENABLED=true
 ```
@@ -120,6 +124,12 @@ Show evaluation summary:
 curl http://localhost:8080/api/v1/evaluation/summary
 ```
 
+Show short-term memory entropy for a session:
+
+```bash
+curl http://localhost:8080/api/v1/memory/entropy/demo-1
+```
+
 ## Key Packages
 
 - `com.medix.agent`: model gateway, ReAct loop, professional agents.
@@ -140,6 +150,7 @@ Current smoke coverage:
 - output repair
 - router and Swarm coordinator
 - real HTTP smoke tests for `/api/v1/chat` and `/api/v1/skills`
+- memory entropy manager, short-term memory auto-clean, Redis TTL, and `/api/v1/memory/entropy/{sessionId}`
 
 Run all tests:
 
