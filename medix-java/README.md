@@ -39,7 +39,7 @@ flowchart LR
 - 7 atomic skills: knowledge retrieval, risk assessment, symptom analysis, lifestyle advice, ICD-10 reference, clinical guideline, deep research.
 - 3 professional agents: health consultation, symptom diagnosis, medical research.
 - Agent Swarm routing: simple questions use the single-agent path; complex, high-risk, or evidence-oriented questions fan out with `CompletableFuture`.
-- Agent loop: model output chooses `CALL_SKILL:<name>` or `FINAL:<answer>`, with max iteration and max skill-call guards.
+- Agent loop: a bounded Think-Act-Observe cycle where the model can call skills, observe their results, continue reasoning, and stop with `FINAL:<answer>` under max iteration and max skill-call guards.
 - Short-term memory: shared session memory with window reduction and deduplication.
 - Memory entropy management: automatic MD5 deduplication, sliding-window compression, entropy estimation, and high-entropy warning logs.
 - Long-term memory: conversation summaries persisted to `conversation_summaries` with pgvector embeddings.

@@ -60,32 +60,50 @@ public class AgentLoopEngine {
     public AgentResult run(String agentId, AgentRequest request) {
         memory.add(request.sessionId(), "user", request.question());
         List<String> skillCalls = new ArrayList<>();
-        String answer = "FINAL:这是基于当前信息的健康建议。";
+        List<String> observations = new ArrayList<>();
+        String answer = null;
         int iterations = 0;
 
-        for (; iterations < maxIterations; iterations++) {
-            String prompt = buildPrompt(request);
-            String decision = modelGateway.complete(agentId, prompt, skillRegistry.metadata());
-            if (decision.startsWith("CALL_SKILL:") && skillCalls.size() < maxSkillCalls) {
-                String skillName = decision.substring("CALL_SKILL:".length());
+        while (iterations < maxIterations && answer == null) {
+            iterations++;
+            String prompt = buildPrompt(request, observations);
+            String decision = normalizeDecision(modelGateway.complete(agentId, prompt, skillRegistry.metadata()));
+            if (decision.startsWith("CALL_SKILL:")) {
+                if (skillCalls.size() >= maxSkillCalls) {
+                    answer = fallbackAnswer("已达到工具调用上限", observations);
+                    break;
+                }
+                String skillName = parseSkillName(decision);
                 SkillResult result = skillRegistry.invoke(skillName, new SkillRequest(request.question(), request.sessionId(), request.context()));
                 skillCalls.add(skillName);
-                answer = "FINAL:" + result.content();
-                break;
+                observations.add(formatObservation(observations.size() + 1, result));
+                if (skillCalls.size() >= maxSkillCalls) {
+                    answer = fallbackAnswer("已达到工具调用上限", observations);
+                }
+                continue;
             }
-            answer = decision;
+            if (decision.startsWith("FINAL:")) {
+                answer = stripFinalPrefix(decision);
+                continue;
+            }
+            answer = decision.isBlank() ? fallbackAnswer("模型未返回有效步骤", observations) : decision;
             break;
         }
 
-        String finalAnswer = answer.replaceFirst("^FINAL:", "");
+        if (answer == null) {
+            answer = fallbackAnswer("已达到最大推理轮次", observations);
+        }
+
+        String finalAnswer = stripFinalPrefix(answer);
         finalAnswer = repairService.repair(finalAnswer);
         memory.add(request.sessionId(), "assistant", finalAnswer);
-        return new AgentResult(agentId, finalAnswer, iterations + 1, skillCalls);
+        return new AgentResult(agentId, finalAnswer, iterations, skillCalls);
     }
 
-    private String buildPrompt(AgentRequest request) {
+    private String buildPrompt(AgentRequest request, List<String> observations) {
         List<ChatMessage> recent = memory.recent(request.sessionId());
         StringBuilder prompt = new StringBuilder(request.question());
+        prompt.append("\n\n请按 ReAct 协议只返回一个下一步：CALL_SKILL:<skill_name> 或 FINAL:<answer>。");
         if (!recent.isEmpty()) {
             prompt.append("\n\n历史上下文：");
             recent.forEach(message -> prompt.append("\n").append(message.role()).append(": ").append(message.content()));
@@ -93,6 +111,44 @@ public class AgentLoopEngine {
         if (!request.context().isEmpty()) {
             prompt.append("\n\n附加上下文：").append(request.context());
         }
+        if (!observations.isEmpty()) {
+            prompt.append("\n\n已获取的工具观察：");
+            observations.forEach(observation -> prompt.append("\n").append(observation));
+        }
         return prompt.toString();
+    }
+
+    private String normalizeDecision(String decision) {
+        return decision == null ? "" : decision.trim();
+    }
+
+    private String parseSkillName(String decision) {
+        String skillName = decision.substring("CALL_SKILL:".length()).trim();
+        int lineBreak = skillName.indexOf('\n');
+        if (lineBreak >= 0) {
+            skillName = skillName.substring(0, lineBreak).trim();
+        }
+        return skillName;
+    }
+
+    private String stripFinalPrefix(String answer) {
+        return answer.replaceFirst("^FINAL:\\s*", "");
+    }
+
+    private String formatObservation(int index, SkillResult result) {
+        return "Observation " + index
+                + " [" + result.skillName() + ", success=" + result.success() + "]\n"
+                + result.content()
+                + "\nmetadata: " + result.metadata();
+    }
+
+    private String fallbackAnswer(String reason, List<String> observations) {
+        StringBuilder answer = new StringBuilder(reason).append("，以下是基于已获取信息的阶段性建议：");
+        if (observations.isEmpty()) {
+            answer.append("\n").append("这是基于当前信息的健康建议。");
+            return answer.toString();
+        }
+        observations.forEach(observation -> answer.append("\n").append(observation));
+        return answer.toString();
     }
 }

@@ -9,6 +9,7 @@ import com.medix.storage.ChatArchiveService;
 import com.medix.swarm.SwarmCoordinator;
 import com.medix.swarm.SwarmResponse;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -47,8 +48,14 @@ public class ChatController {
         String sessionId = request.sessionId() == null || request.sessionId().isBlank()
                 ? UUID.randomUUID().toString()
                 : request.sessionId();
-        Map<String, Object> context = request.context() == null ? Map.of() : request.context();
+        Map<String, Object> context = new LinkedHashMap<>();
+        if (request.context() != null) {
+            context.putAll(request.context());
+        }
         List<ConversationSummary> similarCases = longTermMemoryService.similarCases(request.question(), 3);
+        if (!similarCases.isEmpty()) {
+            context.put("similarCases", similarCases);
+        }
 
         long started = System.nanoTime();
         SwarmResponse response = swarmCoordinator.processDetailed(new AgentRequest(request.question(), sessionId, context));
