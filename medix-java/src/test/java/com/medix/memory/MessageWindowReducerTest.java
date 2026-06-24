@@ -24,6 +24,6 @@ class MessageWindowReducerTest {
         assertThat(reduced).extracting(ChatMessage::content).contains("问题 6", "回答 6");
         assertThat(reduced).extracting(ChatMessage::content).doesNotHaveDuplicates();
         assertThat(reduced.getFirst().role()).isEqualTo("system");
-        assertThat(reduced.getFirst().content()).contains("历史摘要");
+        assertThat(reduced.getFirst().content()).contains("Conversation summary");
     }
 }
