@@ -55,6 +55,7 @@ PostgreSQL: jdbc:postgresql://localhost:5432/postgres
 Username: postgres
 Password: 123456
 Redis: localhost:6379
+Redis password: 123321
 MinIO: http://localhost:9000
 Reranker: http://localhost:8081/rerank
 ```
@@ -79,6 +80,7 @@ MEDIX_OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 MEDIX_OPENAI_MODEL=doubao-seed-1-6-flash-250828
 MEDIX_LIVE_LLM=true
 MEDIX_REDIS_ENABLED=true
+MEDIX_REDIS_PASSWORD=123321
 MEDIX_REDIS_HEALTH_ENABLED=false
 MEDIX_MINIO_ENABLED=true
 MEDIX_RERANKER_ENABLED=true

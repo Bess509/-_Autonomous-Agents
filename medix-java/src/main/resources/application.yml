@@ -19,7 +19,7 @@ spring:
     redis:
       host: ${MEDIX_REDIS_HOST:localhost}
       port: ${MEDIX_REDIS_PORT:6379}
-      password: ${MEDIX_REDIS_PASSWORD:}
+      password: ${MEDIX_REDIS_PASSWORD:123321}
   ai:
     openai:
       api-key: ${MEDIX_OPENAI_API_KEY:}
