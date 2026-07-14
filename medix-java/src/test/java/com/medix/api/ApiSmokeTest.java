@@ -41,7 +41,9 @@ class ApiSmokeTest {
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.body()).contains("\"routeMode\":\"SWARM\"");
-        assertThat(response.body()).contains("\"primaryAgent\":\"lead_agent\"");
+        assertThat(response.body()).contains("\"primaryAgent\":\"diagnostic_agent\"");
+        assertThat(response.body()).contains("\"route.reason\":\"emergency_rule\"");
+        assertThat(response.body()).contains("\"nlu.status\":\"skipped_emergency\"");
         assertThat(response.body()).contains("\"answer\"");
 
         HttpRequest entropyRequest = HttpRequest.newBuilder(uri("/api/v1/memory/entropy/api-test")).GET().build();

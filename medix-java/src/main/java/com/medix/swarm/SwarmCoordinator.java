@@ -58,14 +58,25 @@ public class SwarmCoordinator {
     }
 
     public SwarmResponse processDetailed(AgentRequest request) {
-        List<SwarmSubtask> subtasks = leadAgent.assessAndDecompose(request.question(), request.context());
-        if (subtasks.isEmpty()) {
-            subtasks = List.of(new SwarmSubtask("1", "回答用户问题并提供安全的健康建议：" + request.question(), "consultation_agent"));
+        RouteDecision initialDecision = router.route(request.question());
+        recordRoute(request.sessionId(), initialDecision);
+        List<SwarmSubtask> subtasks;
+        RouteDecision decision;
+        if (initialDecision.requiresLeadAgent()) {
+            sharedContextStore.put(request.sessionId(), "lead_agent.status", "decomposing");
+            subtasks = leadAgent.assessAndDecompose(request.question(), request.context());
+            if (subtasks.isEmpty()) {
+                subtasks = List.of(new SwarmSubtask("1", "回答用户问题并提供安全的健康建议：" + request.question(), "consultation_agent"));
+            }
+            decision = routeFromSubtasks(subtasks);
+            sharedContextStore.put(request.sessionId(), "route.finalReason", decision.reason());
+        } else {
+            subtasks = directSubtasks(request.question(), initialDecision.requiredAgents());
+            decision = initialDecision;
+            sharedContextStore.put(request.sessionId(), "lead_agent.status", "bypassed");
         }
         recordSubtasks(request.sessionId(), subtasks);
-        RouteDecision decision = routeFromSubtasks(subtasks);
         sharedContextStore.put(request.sessionId(), "route.mode", decision.mode().name());
-        sharedContextStore.put(request.sessionId(), "route.reason", decision.reason());
         if (decision.mode() == RouteMode.SINGLE_AGENT) {
             SwarmSubtask subtask = subtasks.getFirst();
             AgentResult result = runSubtask(request, subtask);
@@ -78,9 +89,34 @@ public class SwarmCoordinator {
         for (CompletableFuture<AgentResult> future : futures) {
             results.add(future.join());
         }
-        String answer = leadAgent.synthesize(request.question(), results);
-        sharedContextStore.put(request.sessionId(), "lead_agent.status", "synthesized");
+        String answer;
+        if (initialDecision.requiresLeadAgent()) {
+            answer = leadAgent.synthesize(request.question(), results);
+            sharedContextStore.put(request.sessionId(), "lead_agent.status", "synthesized");
+        } else {
+            answer = results.stream().map(AgentResult::answer).collect(java.util.stream.Collectors.joining("\n\n"));
+        }
         return new SwarmResponse(decision, answer, results, sharedContextStore.entries(request.sessionId()));
+    }
+
+    private List<SwarmSubtask> directSubtasks(String question, List<String> agents) {
+        List<String> effectiveAgents = agents.isEmpty() ? List.of("consultation_agent") : agents;
+        return java.util.stream.IntStream.range(0, effectiveAgents.size())
+                .mapToObj(index -> new SwarmSubtask(String.valueOf(index + 1), question, effectiveAgents.get(index)))
+                .toList();
+    }
+
+    private void recordRoute(String sessionId, RouteDecision decision) {
+        sharedContextStore.put(sessionId, "route.reason", decision.reason());
+        sharedContextStore.put(sessionId, "route.requiresLeadAgent", String.valueOf(decision.requiresLeadAgent()));
+        String nluStatus = switch (decision.reason()) {
+            case "nlu_unavailable" -> "unavailable";
+            case "emergency_rule" -> "skipped_emergency";
+            default -> "completed";
+        };
+        sharedContextStore.put(sessionId, "nlu.status", nluStatus);
+        decision.probabilities().forEach((label, probability) ->
+                sharedContextStore.put(sessionId, "nlu.probability." + label, String.valueOf(probability)));
     }
 
     private AgentResult runSubtask(AgentRequest request, SwarmSubtask subtask) {

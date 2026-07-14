@@ -173,6 +173,26 @@ curl http://localhost:8080/api/v1/memory/entropy/demo-1
 - Harness AOP 校验与 OutputRepairService 输出修复
 - `/api/v1/chat` 与 `/api/v1/skills` smoke 测试
 
+## Ollama 小模型 NLU 混合路由
+
+系统在 LeadAgent 前增加了一个低成本、多标签意图分类层。高置信简单请求直接发送给对应 Worker；多个高置信意图直接并行调用多个 Worker；低置信、意图歧义、Ollama 超时/缺模型或响应格式错误时，安全回退到 LeadAgent。胸痛、呼吸困难、意识不清等高危信号由本地规则优先识别，不依赖模型可用性。
+
+默认模型为 `qwen2.5:1.5b`，可用环境变量调整：
+
+```bash
+ollama pull qwen2.5:1.5b
+MEDIX_NLU_ENABLED=true
+MEDIX_NLU_BASE_URL=http://localhost:11434
+MEDIX_NLU_MODEL=qwen2.5:1.5b
+MEDIX_NLU_TIMEOUT=3s
+MEDIX_NLU_CONFIDENCE_THRESHOLD=0.70
+MEDIX_NLU_LABEL_THRESHOLD=0.55
+MEDIX_NLU_AMBIGUITY_MARGIN=0.10
+MEDIX_NLU_RISK_THRESHOLD=0.30
+```
+
+Ollama 也可运行在 Docker 中；只需将 `MEDIX_NLU_BASE_URL` 指向容器可访问的 `/api/chat` 服务。测试通过注入假分类器完成，不要求本机已下载模型。
+
 ## 说明
 
 - 仓库中的 Java 项目不依赖 `.claude` 或 Python 原项目目录。

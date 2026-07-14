@@ -35,7 +35,7 @@ class SwarmCoordinatorTest {
 
         String answer = coordinator.process(new AgentRequest("胸痛 呼吸困难 高血压 指南", "s1", Map.of()));
 
-        assertThat(answer).contains("综合问题");
+        assertThat(answer).contains("风险等级：高危");
         assertThat(answer).contains("免责声明");
     }
 
@@ -61,7 +61,7 @@ class SwarmCoordinatorTest {
                 sharedContextStore
         );
 
-        SwarmResponse response = coordinator.processDetailed(new AgentRequest("胸痛怎么办", "single-subtask", Map.of()));
+        SwarmResponse response = coordinator.processDetailed(new AgentRequest("最近经常头晕怎么办", "single-subtask", Map.of()));
 
         assertThat(response.decision().mode()).isEqualTo(RouteMode.SINGLE_AGENT);
         assertThat(response.decision().primaryAgent()).isEqualTo("diagnostic_agent");
