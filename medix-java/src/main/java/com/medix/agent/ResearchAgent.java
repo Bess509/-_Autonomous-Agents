@@ -4,11 +4,9 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class ResearchAgent implements MedicalAgent {
-    private final AgentLoopEngine loop;
+    private final AgentRuntimePort runtime;
 
-    public ResearchAgent(AgentLoopEngine loop) {
-        this.loop = loop;
-    }
+    public ResearchAgent(@org.springframework.beans.factory.annotation.Qualifier("agentRuntimeSelector") AgentRuntimePort runtime) { this.runtime = runtime; }
 
     @Override
     public String agentId() {
@@ -17,6 +15,6 @@ public class ResearchAgent implements MedicalAgent {
 
     @Override
     public AgentResult answer(AgentRequest request) {
-        return loop.run(agentId(), request);
+        return runtime.run(agentId(), request);
     }
 }

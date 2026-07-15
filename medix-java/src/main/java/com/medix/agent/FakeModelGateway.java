@@ -70,27 +70,29 @@ public class FakeModelGateway implements ModelGateway {
             StringBuilder subtasks = new StringBuilder("{\"subtasks\":[");
             boolean appended = false;
             if (highRisk) {
-                subtasks.append("{\"description\":\"评估症状风险等级和紧急程度\",\"assigned_agent\":\"diagnostic_agent\"}");
+                subtasks.append("{\"description\":").append(jsonString("评估症状风险等级和紧急程度：" + question))
+                        .append(",\"assigned_agent\":\"diagnostic_agent\"}");
                 appended = true;
             }
             if (research) {
                 if (appended) {
                     subtasks.append(",");
                 }
-                subtasks.append("{\"description\":\"检索临床指南和医学证据\",\"assigned_agent\":\"research_agent\"}");
+                subtasks.append("{\"description\":").append(jsonString("检索临床指南和医学证据：" + question))
+                        .append(",\"assigned_agent\":\"research_agent\"}");
                 appended = true;
             }
             if (lifestyle || highRisk) {
                 if (appended) {
                     subtasks.append(",");
                 }
-                subtasks.append("{\"description\":\"提供健康咨询和生活方式建议\",\"assigned_agent\":\"consultation_agent\"}");
+                subtasks.append("{\"description\":").append(jsonString("提供健康咨询和生活方式建议：" + question))
+                        .append(",\"assigned_agent\":\"consultation_agent\"}");
             }
             return subtasks.append("]}").toString();
         }
-        return """
-                {"subtasks":[{"description":"回答用户问题并提供安全的健康建议","assigned_agent":"consultation_agent"}]}
-                """;
+        return "{\"subtasks\":[{\"description\":" + jsonString("回答用户问题并提供安全的健康建议：" + question)
+                + ",\"assigned_agent\":\"consultation_agent\"}]}";
     }
 
     private String extractLeadQuestion(String userPrompt) {
@@ -114,5 +116,11 @@ public class FakeModelGateway implements ModelGateway {
             }
         }
         return false;
+    }
+
+    private String jsonString(String value) {
+        String escaped = value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\r", "\\r").replace("\n", "\\n");
+        return "\"" + escaped + "\"";
     }
 }

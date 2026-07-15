@@ -39,16 +39,23 @@ management:
         include: health,info
 
 medix:
+  security:
+    production: ${MEDIX_PRODUCTION:false}
+    jwt-secret: ${MEDIX_JWT_SECRET:dev-only-change-this-secret-32bytes}
+    jwt-ttl-seconds: ${MEDIX_JWT_TTL_SECONDS:28800}
   nlu:
+    # Local Ollama intent classification is enabled by default. Set
+    # MEDIX_NLU_ENABLED=false only when an explicit LeadAgent fallback is needed.
     enabled: ${MEDIX_NLU_ENABLED:true}
     base-url: ${MEDIX_NLU_BASE_URL:http://localhost:11434}
     model: ${MEDIX_NLU_MODEL:qwen2.5:1.5b}
-    timeout: ${MEDIX_NLU_TIMEOUT:3s}
+    timeout: ${MEDIX_NLU_TIMEOUT:8s}
     confidence-threshold: ${MEDIX_NLU_CONFIDENCE_THRESHOLD:0.70}
     label-threshold: ${MEDIX_NLU_LABEL_THRESHOLD:0.55}
     ambiguity-margin: ${MEDIX_NLU_AMBIGUITY_MARGIN:0.10}
     risk-threshold: ${MEDIX_NLU_RISK_THRESHOLD:0.30}
   agent:
+    engine: ${MEDIX_AGENT_ENGINE:agentscope}
     max-iterations: 5
     max-skill-calls: 3
     single-agent-timeout: 15s
@@ -67,6 +74,7 @@ medix:
     redis: ${MEDIX_REDIS_ENABLED:true}
     minio: ${MEDIX_MINIO_ENABLED:false}
     reranker: ${MEDIX_RERANKER_ENABLED:true}
+    vector-store: ${MEDIX_VECTOR_STORE_ENABLED:false}
   services:
     reranker-url: ${MEDIX_RERANKER_URL:http://localhost:8081/rerank}
     minio-endpoint: ${MEDIX_MINIO_ENDPOINT:http://localhost:9000}

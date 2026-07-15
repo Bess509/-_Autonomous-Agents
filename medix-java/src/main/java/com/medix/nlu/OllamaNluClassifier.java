@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.http.HttpClient;
 import java.util.EnumMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -15,9 +16,19 @@ import org.springframework.web.client.RestClient;
 @Component
 public class OllamaNluClassifier implements NluClassifier {
     private static final String SYSTEM_PROMPT = """
-            You are a deterministic Chinese medical NLU classifier. Return JSON only, with exactly this shape:
-            {"probabilities":{"HEALTH_CONSULTATION":0.0,"SYMPTOM_ANALYSIS":0.0,"RISK_ASSESSMENT":0.0,"GUIDELINE_SEARCH":0.0,"DISEASE_CODE":0.0,"LIFESTYLE_ADVICE":0.0}}
-            Every value must be a number from 0 to 1. Labels are independent multi-label probabilities. No markdown or explanation.
+            你是确定性的中文医疗意图路由器。分别判断用户是否明确需要以下能力：
+            HEALTH_CONSULTATION=一般健康科普或身份询问；
+            SYMPTOM_ANALYSIS=解释用户正在经历的具体症状；
+            RISK_ASSESSMENT=用户询问是否危险、是否需要急诊；
+            GUIDELINE_SEARCH=用户明确要求指南、证据、研究或规范；
+            DISEASE_CODE=用户明确要求 ICD 或疾病编码；
+            LIFESTYLE_ADVICE=用户要求饮食、睡眠、作息或运动建议。
+
+            最相关标签应为 0.80 到 1.00。除非用户明确同时提出另一需求，否则其他标签不得高于 0.20。
+            不要因为问题属于医学就提高 GUIDELINE_SEARCH，也不要因为描述生活状态就提高 SYMPTOM_ANALYSIS。
+            示例：你是谁 => HEALTH_CONSULTATION 0.95；我最近睡不好想改善作息 => LIFESTYLE_ADVICE 0.95；
+            胸痛两小时危险吗 => RISK_ASSESSMENT 0.98、SYMPTOM_ANALYSIS 0.80；查高血压最新指南 => GUIDELINE_SEARCH 0.95。
+            只按响应 schema 返回，不要输出 Markdown 或解释。
             """;
 
     private final RestClient client;
@@ -42,14 +53,20 @@ public class OllamaNluClassifier implements NluClassifier {
             Map<String, Object> body = Map.of(
                     "model", properties.model(),
                     "stream", false,
-                    "format", "json",
+                    "format", responseFormat(),
                     "options", Map.of("temperature", 0),
                     "messages", new Object[]{
                             Map.of("role", "system", "content", SYSTEM_PROMPT),
                             Map.of("role", "user", "content", text == null ? "" : text)
                     }
             );
-            JsonNode response = client.post().uri("/api/chat").body(body).retrieve().body(JsonNode.class);
+            String responseBody = client.post().uri("/api/chat").body(body).retrieve().body(String.class);
+            JsonNode response;
+            try {
+                response = objectMapper.readTree(responseBody);
+            } catch (Exception exception) {
+                throw new NluClassificationException("Invalid Ollama response JSON", exception);
+            }
             if (response == null || !response.path("message").path("content").isTextual()) {
                 throw new NluClassificationException("Ollama response has no message.content");
             }
@@ -91,5 +108,24 @@ public class OllamaNluClassifier implements NluClassifier {
         } catch (Exception exception) {
             throw new NluClassificationException("Invalid NLU JSON", exception);
         }
+    }
+
+    private Map<String, Object> responseFormat() {
+        Map<String, Object> labelProperties = new LinkedHashMap<>();
+        for (IntentLabel label : IntentLabel.values()) {
+            labelProperties.put(label.name(), Map.of("type", "number", "minimum", 0, "maximum", 1));
+        }
+        Map<String, Object> probabilities = Map.of(
+                "type", "object",
+                "additionalProperties", false,
+                "required", Set.of(IntentLabel.values()).stream().map(Enum::name).toList(),
+                "properties", labelProperties
+        );
+        return Map.of(
+                "type", "object",
+                "additionalProperties", false,
+                "required", new String[]{"probabilities"},
+                "properties", Map.of("probabilities", probabilities)
+        );
     }
 }

@@ -35,7 +35,7 @@ class SwarmCoordinatorTest {
 
         String answer = coordinator.process(new AgentRequest("胸痛 呼吸困难 高血压 指南", "s1", Map.of()));
 
-        assertThat(answer).contains("风险等级：高危");
+        assertThat(answer).contains("高危信号", "120");
         assertThat(answer).contains("免责声明");
     }
 
@@ -66,7 +66,8 @@ class SwarmCoordinatorTest {
         assertThat(response.decision().mode()).isEqualTo(RouteMode.SINGLE_AGENT);
         assertThat(response.decision().primaryAgent()).isEqualTo("diagnostic_agent");
         assertThat(response.agentResults()).extracting(AgentResult::agentId).containsExactly("diagnostic_agent");
-        assertThat(response.answer()).contains("diagnostic_agent handled: 评估胸痛风险");
+        assertThat(response.answer()).contains("证据摘要", "综合建议")
+                .doesNotContain("diagnostic_agent handled");
         assertThat(response.sharedContext()).containsEntry("subtask.1.assignedAgent", "diagnostic_agent");
         assertThat(response.sharedContext()).containsEntry("subtask.1.status", "completed");
     }
@@ -103,8 +104,9 @@ class SwarmCoordinatorTest {
         assertThat(response.decision().requiredAgents()).containsExactly("consultation_agent", "research_agent");
         assertThat(response.agentResults()).extracting(AgentResult::agentId)
                 .containsExactlyInAnyOrder("consultation_agent", "research_agent");
-        assertThat(response.answer()).contains("consultation_agent handled: 提供高血压生活方式建议");
-        assertThat(response.answer()).contains("research_agent handled: 检索高血压指南证据");
+        assertThat(response.answer()).contains("证据摘要", "综合建议")
+                .doesNotContain("consultation_agent handled", "research_agent handled");
+        assertThat(response.sharedContext()).containsEntry("response.synthesizerInvocations", "1");
         assertThat(response.sharedContext()).containsEntry("subtask.1.status", "completed");
         assertThat(response.sharedContext()).containsEntry("subtask.2.status", "completed");
         assertThat(response.sharedContext()).containsEntry("contribution.1.agent", "consultation_agent");
@@ -132,7 +134,7 @@ class SwarmCoordinatorTest {
                 Map.of()
         ));
 
-        assertThat(response.answer()).contains("research_agent handled: perform deep research");
+        assertThat(response.answer()).contains("证据摘要").doesNotContain("research_agent handled");
         assertThat(response.agentResults()).extracting(AgentResult::agentId).contains("research_agent");
         assertThat(response.sharedContext()).containsEntry("subtask.1.status", "delegated");
         assertThat(response.sharedContext()).containsValue("research_agent");
@@ -158,8 +160,8 @@ class SwarmCoordinatorTest {
 
         SwarmResponse response = coordinator.processDetailed(new AgentRequest("hypertension management and evidence", "partial-failure", Map.of()));
 
-        assertThat(response.answer()).contains("consultation_agent handled: provide lifestyle advice");
-        assertThat(response.answer()).contains("research_agent 暂时无法完成");
+        assertThat(response.answer()).contains("证据摘要", "综合建议")
+                .doesNotContain("consultation_agent handled", "research_agent 暂时无法完成");
         assertThat(response.sharedContext()).containsEntry("subtask.2.status", "failed");
     }
 

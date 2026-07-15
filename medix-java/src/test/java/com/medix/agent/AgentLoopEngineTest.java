@@ -28,7 +28,7 @@ class AgentLoopEngineTest {
 
         assertThat(result.iterations()).isEqualTo(2);
         assertThat(result.skillCalls()).containsExactly("assess_risk");
-        assertThat(result.answer()).contains("免责声明");
+        assertThat(result.answer()).doesNotContain("免责声明");
     }
 
     @Test
@@ -53,7 +53,7 @@ class AgentLoopEngineTest {
         assertThat(modelGateway.prompts().get(1)).contains("knowledge observation");
         assertThat(modelGateway.prompts().get(2)).contains("lifestyle observation");
         assertThat(result.answer()).contains("combined answer");
-        assertThat(result.answer()).contains("免责声明");
+        assertThat(result.answer()).doesNotContain("免责声明");
     }
 
     @Test
@@ -72,7 +72,7 @@ class AgentLoopEngineTest {
 
         assertThat(result.skillCalls()).containsExactly("search_knowledge");
         assertThat(result.answer()).contains("knowledge observation");
-        assertThat(result.answer()).contains("免责声明");
+        assertThat(result.answer()).doesNotContain("免责声明");
     }
 
     @Test
@@ -91,7 +91,7 @@ class AgentLoopEngineTest {
 
         assertThat(result.iterations()).isEqualTo(2);
         assertThat(result.answer()).contains("guideline observation");
-        assertThat(result.answer()).contains("免责声明");
+        assertThat(result.answer()).doesNotContain("免责声明");
     }
 
     @Test

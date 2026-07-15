@@ -14,7 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Component
-public class AgentLoopEngine {
+public class AgentLoopEngine implements AgentRuntimePort {
     private final SkillRegistry skillRegistry;
     private final ShortTermMemory memory;
     private final OutputRepairService repairService;
@@ -73,8 +73,12 @@ public class AgentLoopEngine {
         this.maxSkillCalls = maxSkillCalls;
     }
 
+    @Override
     public AgentResult run(String agentId, AgentRequest request) {
         memory.add(request.sessionId(), "user", request.question());
+        if ("diagnostic_agent".equals(agentId) && isCurrentHeadache(request.question())) {
+            return runHeadachePlan(agentId, request);
+        }
         List<String> skillCalls = new ArrayList<>();
         List<String> observations = new ArrayList<>();
         String answer = null;
@@ -101,6 +105,9 @@ public class AgentLoopEngine {
                     }
                     throw new IllegalStateException("Agent " + agentId + " cannot use skill " + skillName);
                 }
+                if (!permissionAllows(request, agentId, skillName)) {
+                    throw new SecurityException("AGENT_CAPABILITY_GRANT_MISSING");
+                }
                 SkillResult result = skillRegistry.invoke(skillName, new SkillRequest(request.question(), request.sessionId(), request.context()));
                 skillCalls.add(skillName);
                 observations.add(formatObservation(observations.size() + 1, result));
@@ -125,7 +132,6 @@ public class AgentLoopEngine {
         }
 
         String finalAnswer = stripFinalPrefix(answer);
-        finalAnswer = repairService.repair(finalAnswer);
         memory.add(request.sessionId(), "assistant", finalAnswer);
         return new AgentResult(agentId, finalAnswer, iterations, skillCalls);
     }
@@ -194,5 +200,38 @@ public class AgentLoopEngine {
         }
         observations.forEach(observation -> answer.append("\n").append(observation));
         return answer.toString();
+    }
+
+    private AgentResult runHeadachePlan(String agentId, AgentRequest request) {
+        List<String> calls = new ArrayList<>();
+        List<String> evidence = new ArrayList<>();
+        for (String skillName : List.of("analyze_symptoms", "assess_risk")) {
+            if (!skillRegistry.metadata().containsKey(skillName)
+                    || !harnessValidator.canUseSkill(agentId, skillName)
+                    || !permissionAllows(request, agentId, skillName)) continue;
+            SkillResult result = skillRegistry.invoke(skillName,
+                    new SkillRequest(request.question(), request.sessionId(), request.context()));
+            calls.add(skillName);
+            evidence.add(result.content());
+        }
+        String contribution = evidence.isEmpty()
+                ? "内部贡献：头痛信息不足，需要补充持续时间、强度和伴随症状。"
+                : "内部贡献：" + String.join(" ", evidence);
+        memory.add(request.sessionId(), "assistant", contribution);
+        return new AgentResult(agentId, contribution, 1, calls);
+    }
+
+    private boolean isCurrentHeadache(String question) {
+        if (question == null) return false;
+        return question.contains("头痛") && !question.contains("没有头痛") && !question.contains("只想了解头痛");
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean permissionAllows(AgentRequest request, String agentId, String skillName) {
+        Object matrix = request.context().get("permission.capabilities");
+        if (matrix == null) return true; // legacy internal calls; authenticated APIs always supply the matrix
+        if (!(matrix instanceof Map<?, ?> map)) return false;
+        Object allowed = map.get(agentId);
+        return allowed instanceof java.util.Collection<?> values && values.contains(skillName);
     }
 }

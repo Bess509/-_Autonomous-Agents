@@ -17,7 +17,7 @@ public record NluProperties(
     public NluProperties {
         baseUrl = baseUrl == null || baseUrl.isBlank() ? "http://localhost:11434" : baseUrl;
         model = model == null || model.isBlank() ? "qwen2.5:1.5b" : model;
-        timeout = timeout == null ? Duration.ofSeconds(3) : timeout;
+        timeout = timeout == null ? Duration.ofSeconds(8) : timeout;
         confidenceThreshold = validProbability(confidenceThreshold) ? confidenceThreshold : 0.70;
         labelThreshold = validProbability(labelThreshold) ? labelThreshold : 0.55;
         ambiguityMargin = validProbability(ambiguityMargin) ? ambiguityMargin : 0.10;
@@ -30,6 +30,6 @@ public record NluProperties(
 
     public static NluProperties disabled() {
         return new NluProperties(false, "http://localhost:11434", "qwen2.5:1.5b",
-                Duration.ofSeconds(3), 0.70, 0.55, 0.10, 0.30);
+                Duration.ofSeconds(8), 0.70, 0.55, 0.10, 0.30);
     }
 }

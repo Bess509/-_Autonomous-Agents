@@ -4,12 +4,8 @@ import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
-import org.springaicommunity.agent.tools.SkillsTool;
-import org.springaicommunity.agent.utils.Skills;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.ResourcePatternResolver;
 import org.springframework.stereotype.Service;
@@ -24,17 +20,10 @@ public class SkillDisclosureService {
     }
 
     @PostConstruct
-    public void loadSkillDocs() throws Exception {
+    public void loadSkillDocs() throws IOException {
         Resource[] resources = resourceResolver.getResources("classpath*:skills/*/SKILL.md");
         descriptors.clear();
-        try {
-            for (SkillsTool.Skill skill : Skills.loadDirectories(skillDirectories(resources))) {
-                String description = String.valueOf(skill.frontMatter().getOrDefault("description", ""));
-                descriptors.add(new SkillDescriptor(skill.name(), description, preview(skill.content())));
-            }
-        } catch (RuntimeException ex) {
-            descriptors.addAll(fallbackDescriptors(resources));
-        }
+        descriptors.addAll(parseDescriptors(resources));
     }
 
     public List<SkillDescriptor> list() {
@@ -46,15 +35,7 @@ public class SkillDisclosureService {
         return compact.length() <= 220 ? compact : compact.substring(0, 220) + "...";
     }
 
-    private List<String> skillDirectories(Resource[] resources) throws IOException {
-        Set<String> directories = new LinkedHashSet<>();
-        for (Resource resource : resources) {
-            directories.add(resource.getFile().getParentFile().getAbsolutePath());
-        }
-        return List.copyOf(directories);
-    }
-
-    private List<SkillDescriptor> fallbackDescriptors(Resource[] resources) throws IOException {
+    private List<SkillDescriptor> parseDescriptors(Resource[] resources) throws IOException {
         List<SkillDescriptor> fallback = new ArrayList<>();
         for (Resource resource : resources) {
             String content = resource.getContentAsString(StandardCharsets.UTF_8);

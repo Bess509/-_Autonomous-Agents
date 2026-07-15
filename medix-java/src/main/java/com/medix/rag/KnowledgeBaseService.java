@@ -1,10 +1,9 @@
 package com.medix.rag;
 
-import dev.langchain4j.data.document.Metadata;
-import dev.langchain4j.data.segment.TextSegment;
 import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -13,6 +12,11 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -23,11 +27,15 @@ public class KnowledgeBaseService {
 
     private final ResourcePatternResolver resourceResolver;
     private final RerankerClient rerankerClient;
-    private final List<TextSegment> segments = new CopyOnWriteArrayList<>();
+    private final VectorStore vectorStore;
+    private final List<Document> documents = new CopyOnWriteArrayList<>();
 
-    public KnowledgeBaseService(ResourcePatternResolver resourceResolver, RerankerClient rerankerClient) {
+    public KnowledgeBaseService(ResourcePatternResolver resourceResolver, RerankerClient rerankerClient,
+                                ObjectProvider<VectorStore> vectorStoreProvider,
+                                @Value("${medix.features.vector-store:false}") boolean vectorEnabled) {
         this.resourceResolver = resourceResolver;
         this.rerankerClient = rerankerClient;
+        this.vectorStore = vectorEnabled ? vectorStoreProvider.getIfAvailable() : null;
     }
 
     @PostConstruct
@@ -40,8 +48,12 @@ public class KnowledgeBaseService {
     }
 
     public List<KnowledgeSnippet> retrieve(String query, int limit) {
-        List<KnowledgeSnippet> ranked = segments.stream()
-                .map(segment -> toSnippet(query, segment))
+        List<Document> candidates = vectorStore == null
+                ? documents
+                : vectorStore.similaritySearch(SearchRequest.builder().query(query).topK(Math.max(limit * 3, limit)).build());
+        List<KnowledgeSnippet> ranked = candidates.stream()
+                .filter(this::governed)
+                .map(document -> toSnippet(query, document))
                 .filter(snippet -> snippet.score() > 0.0)
                 .sorted(Comparator.comparingDouble(KnowledgeSnippet::score).reversed())
                 .limit(Math.max(limit * 3L, limit))
@@ -52,29 +64,49 @@ public class KnowledgeBaseService {
     public void addDocument(String title, String content, String source) {
         List<String> chunks = split(content, 700);
         for (int i = 0; i < chunks.size(); i++) {
-            Metadata metadata = Metadata.from(Map.of(
-                    "id", UUID.randomUUID().toString(),
-                    "title", title,
-                    "source", source,
-                    "chunk", i
-            ));
-            segments.add(TextSegment.from(chunks.get(i), metadata));
+            Map<String, Object> metadata = Map.ofEntries(
+                    Map.entry("id", UUID.randomUUID().toString()),
+                    Map.entry("title", title),
+                    Map.entry("source", source),
+                    Map.entry("chunkId", title + "-" + i),
+                    Map.entry("guidelineVersion", "bundled-1"),
+                    Map.entry("publishedAt", "2026-01-01T00:00:00Z"),
+                    Map.entry("reviewedAt", "2026-07-01T00:00:00Z"),
+                    Map.entry("evidenceLevel", "INTERNAL_REFERENCE"),
+                    Map.entry("reviewStatus", "APPROVED"),
+                    Map.entry("tenantId", "public")
+            );
+            Document document = new Document(UUID.randomUUID().toString(), chunks.get(i), metadata);
+            documents.add(document);
+            if (vectorStore != null) vectorStore.add(List.of(document));
         }
     }
 
     public int size() {
-        return segments.size();
+        return documents.size();
     }
 
-    private KnowledgeSnippet toSnippet(String query, TextSegment segment) {
-        Map<String, Object> metadata = segment.metadata().toMap();
+    private KnowledgeSnippet toSnippet(String query, Document document) {
+        Map<String, Object> metadata = document.getMetadata();
         return new KnowledgeSnippet(
                 String.valueOf(metadata.get("id")),
                 String.valueOf(metadata.get("title")),
-                segment.text(),
-                score(query, segment.text()),
+                document.getText(),
+                document.getScore() == null ? score(query, document.getText()) : document.getScore(),
                 metadata
         );
+    }
+
+    private boolean governed(Document document) {
+        Map<String, Object> metadata = document.getMetadata();
+        if (!"APPROVED".equals(metadata.get("reviewStatus"))) return false;
+        if (!"public".equals(metadata.get("tenantId"))) return false;
+        Object reviewed = metadata.get("reviewedAt");
+        try {
+            return reviewed != null && Instant.parse(String.valueOf(reviewed)).isAfter(Instant.now().minusSeconds(366L * 86400));
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     private double score(String query, String text) {

@@ -11,6 +11,8 @@ import java.time.Duration;
 import java.util.EnumMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class SwarmRouterTest {
     @Test
@@ -74,6 +76,65 @@ class SwarmRouterTest {
 
         assertThat(decision.requiresLeadAgent()).isTrue();
         assertThat(decision.reason()).isEqualTo("nlu_unavailable");
+    }
+
+    @Test
+    void disabledNluBypassesClassifierAndUsesLeadAgent() {
+        NluClassifier exploding = text -> { throw new AssertionError("classifier must not be called"); };
+        NluProperties disabled = new NluProperties(false, "http://localhost:11434", "test", Duration.ofSeconds(1),
+                0.70, 0.55, 0.10, 0.30);
+
+        RouteDecision decision = new SwarmRouter(exploding, new EmergencyRiskDetector(), disabled).route("普通问题");
+
+        assertThat(decision.requiresLeadAgent()).isTrue();
+        assertThat(decision.reason()).isEqualTo("nlu_disabled");
+        assertThat(decision.probabilities()).isEmpty();
+    }
+
+    @Test
+    void currentHeadacheSuppressesDriftingDiseaseCodeAndUsesDiagnosticRoute() {
+        RouteDecision decision = router(scores(0.02, 0.72, 0.65, 0.01, 0.98, 0.01)).route("我有点头痛");
+
+        assertThat(decision.primaryAgent()).isEqualTo("diagnostic_agent");
+        assertThat(decision.requiredAgents()).containsExactly("diagnostic_agent");
+        assertThat(decision.reason()).isEqualTo("symptom_policy_disease_code_suppressed");
+    }
+
+    @Test
+    void explicitIcdQuestionCanUseDiseaseCodeIntent() {
+        RouteDecision decision = router(scores(0.02, 0.10, 0.05, 0.01, 0.98, 0.01))
+                .route("头痛对应什么 ICD-10 编码");
+
+        assertThat(decision.primaryAgent()).isEqualTo("diagnostic_agent");
+        assertThat(decision.reason()).isEqualTo("nlu_high_confidence_single");
+    }
+
+    @Test
+    void severeHeadacheWithNeurologicDeficitIsEmergencyButMildHeadacheIsNot() {
+        EmergencyRiskDetector detector = new EmergencyRiskDetector();
+        assertThat(detector.isEmergency("突发剧烈头痛，伴一侧无力和意识异常")).isTrue();
+        assertThat(detector.isEmergency("我有点头痛")).isFalse();
+        assertThat(detector.isEmergency("没有剧烈头痛，也没有一侧无力")).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "没有胸痛，只是轻微不适",
+            "没有剧烈头痛，只是有点轻微不适",
+            "否认呼吸困难，也未出现意识不清"
+    })
+    void emergencyDetectorIgnoresLocallyNegatedRedFlags(String input) {
+        assertThat(new EmergencyRiskDetector().isEmergency(input)).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "现在呼吸困难",
+            "没有胸痛，但现在呼吸困难",
+            "没有剧烈头痛，不过随后突发剧烈头痛"
+    })
+    void emergencyDetectorKeepsLaterAffirmedRedFlags(String input) {
+        assertThat(new EmergencyRiskDetector().isEmergency(input)).isTrue();
     }
 
     private SwarmRouter router(NluResult result) {

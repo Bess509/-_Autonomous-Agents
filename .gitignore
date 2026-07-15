@@ -4,12 +4,19 @@ target/
 .vscode/
 *.iml
 *.log
+medix-java/windows-launcher/logs/
+medix-java/windows-launcher/state/
+**/node_modules/
+**/dist/
+*.tsbuildinfo
 
 # Only the Java medical assistant is published from this workspace.
-docs/
+docs/*
+!docs/PRD-frontend-agui-permissions.md
 MediX-R1/
 medix-agent-swarm/
 config.py
 *.mp4
 __pycache__/
 *.py[cod]
+py/

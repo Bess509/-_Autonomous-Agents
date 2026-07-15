@@ -16,12 +16,31 @@ public class SpringAiModelGateway implements ModelGateway {
 
     @Override
     public String complete(String agentId, String userPrompt, Map<String, String> skillMetadata) {
-        String systemPrompt = "lead_agent".equals(agentId) ? leadAgentPrompt(skillMetadata) : workerPrompt(agentId, skillMetadata);
+        String systemPrompt = switch (agentId) {
+            case "lead_agent" -> leadAgentPrompt(skillMetadata);
+            case "lead_synthesizer" -> synthesisPrompt();
+            default -> workerPrompt(agentId, skillMetadata);
+        };
         return chatClient.prompt()
                 .system(systemPrompt)
                 .user(userPrompt)
                 .call()
                 .content();
+    }
+
+    @Override
+    public boolean live() {
+        return true;
+    }
+
+    private String synthesisPrompt() {
+        return """
+                You are MediX's final response synthesizer. Use only the supplied user question and worker/tool evidence.
+                Return exactly one concise Chinese medical-information answer, with no JSON, markdown fence, hidden reasoning,
+                credentials, internal identifiers, or provider details. Preserve urgent red flags. Never diagnose with certainty
+                or prescribe. When evidence is insufficient, say what information is missing and give conservative next steps.
+                Do not add more than one medical disclaimer.
+                """;
     }
 
     private String leadAgentPrompt(Map<String, String> workerCapabilities) {

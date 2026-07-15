@@ -8,11 +8,13 @@ import com.medix.agent.DiagnosticAgent;
 import com.medix.agent.LeadAgent;
 import com.medix.agent.MedicalAgent;
 import com.medix.agent.ResearchAgent;
+import com.medix.harness.OutputRepairService;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -25,6 +27,7 @@ public class SwarmCoordinator {
     private final ResearchAgent researchAgent;
     private final LeadAgent leadAgent;
     private final SharedContextStore sharedContextStore;
+    private final OutputRepairService outputSafety;
 
     @Autowired
     public SwarmCoordinator(
@@ -33,7 +36,8 @@ public class SwarmCoordinator {
             DiagnosticAgent diagnosticAgent,
             ResearchAgent researchAgent,
             LeadAgent leadAgent,
-            SharedContextStore sharedContextStore
+            SharedContextStore sharedContextStore,
+            OutputRepairService outputSafety
     ) {
         this.router = router;
         this.consultationAgent = consultationAgent;
@@ -41,6 +45,19 @@ public class SwarmCoordinator {
         this.researchAgent = researchAgent;
         this.leadAgent = leadAgent;
         this.sharedContextStore = sharedContextStore;
+        this.outputSafety = outputSafety;
+    }
+
+    public SwarmCoordinator(
+            SwarmRouter router,
+            ConsultationAgent consultationAgent,
+            DiagnosticAgent diagnosticAgent,
+            ResearchAgent researchAgent,
+            LeadAgent leadAgent,
+            SharedContextStore sharedContextStore
+    ) {
+        this(router, consultationAgent, diagnosticAgent, researchAgent, leadAgent, sharedContextStore,
+                new OutputRepairService());
     }
 
     public SwarmCoordinator(
@@ -50,7 +67,8 @@ public class SwarmCoordinator {
             ResearchAgent researchAgent,
             LeadAgent leadAgent
     ) {
-        this(router, consultationAgent, diagnosticAgent, researchAgent, leadAgent, new SharedContextStore());
+        this(router, consultationAgent, diagnosticAgent, researchAgent, leadAgent, new SharedContextStore(),
+                new OutputRepairService());
     }
 
     public String process(AgentRequest request) {
@@ -58,8 +76,25 @@ public class SwarmCoordinator {
     }
 
     public SwarmResponse processDetailed(AgentRequest request) {
+        return processDetailed(request, Set.of("consultation_agent", "diagnostic_agent", "research_agent"));
+    }
+
+    public SwarmResponse processDetailed(AgentRequest request, Set<String> allowedAgents) {
+        Map<String, Object> authorizedContext = new LinkedHashMap<>(request.context());
+        authorizedContext.put("security.allowedAgents", Set.copyOf(allowedAgents));
+        request = new AgentRequest(request.question(), request.sessionId(), authorizedContext);
+        final AgentRequest executionRequest = request;
         RouteDecision initialDecision = router.route(request.question());
         recordRoute(request.sessionId(), initialDecision);
+        if ("emergency_rule".equals(initialDecision.reason()) && !allowedAgents.contains("diagnostic_agent")) {
+            sharedContextStore.put(request.sessionId(), "emergency.status", "fixed_safety_response");
+            String safeAnswer = outputSafety.repair(
+                    "检测到可能危及生命的急症信号。即使当前账户没有诊断 Agent 权限，也请立即拨打 120 "
+                            + "或前往急诊，不要等待在线回复，也不要自行驾车。"
+            , request.question());
+            return new SwarmResponse(initialDecision, safeAnswer, List.of(),
+                    sharedContextStore.entries(request.sessionId()));
+        }
         List<SwarmSubtask> subtasks;
         RouteDecision decision;
         if (initialDecision.requiresLeadAgent()) {
@@ -79,24 +114,31 @@ public class SwarmCoordinator {
         sharedContextStore.put(request.sessionId(), "route.mode", decision.mode().name());
         if (decision.mode() == RouteMode.SINGLE_AGENT) {
             SwarmSubtask subtask = subtasks.getFirst();
+            requireAllowed(subtask.assignedAgent(), allowedAgents);
             AgentResult result = runSubtask(request, subtask);
-            return new SwarmResponse(decision, result.answer(), List.of(result), sharedContextStore.entries(request.sessionId()));
+            String answer = synthesize(request.question(), List.of(result));
+            sharedContextStore.put(request.sessionId(), "response.synthesizerInvocations", "1");
+            return new SwarmResponse(decision, outputSafety.repair(answer, request.question()), List.of(result),
+                    sharedContextStore.entries(request.sessionId()));
         }
+        subtasks.forEach(subtask -> requireAllowed(subtask.assignedAgent(), allowedAgents));
         List<CompletableFuture<AgentResult>> futures = subtasks.stream()
-                .map(subtask -> CompletableFuture.supplyAsync(() -> runSubtask(request, subtask)))
+                .map(subtask -> CompletableFuture.supplyAsync(() -> runSubtask(executionRequest, subtask)))
                 .toList();
         List<AgentResult> results = new ArrayList<>();
         for (CompletableFuture<AgentResult> future : futures) {
             results.add(future.join());
         }
-        String answer;
-        if (initialDecision.requiresLeadAgent()) {
-            answer = leadAgent.synthesize(request.question(), results);
-            sharedContextStore.put(request.sessionId(), "lead_agent.status", "synthesized");
-        } else {
-            answer = results.stream().map(AgentResult::answer).collect(java.util.stream.Collectors.joining("\n\n"));
-        }
-        return new SwarmResponse(decision, answer, results, sharedContextStore.entries(request.sessionId()));
+        String answer = synthesize(request.question(), results);
+        sharedContextStore.put(request.sessionId(), "response.synthesizerInvocations", "1");
+        sharedContextStore.put(request.sessionId(), "lead_agent.status", "synthesized");
+        return new SwarmResponse(decision, outputSafety.repair(answer, request.question()), results,
+                sharedContextStore.entries(request.sessionId()));
+    }
+
+    private String synthesize(String question, List<AgentResult> results) {
+        String answer = leadAgent.synthesize(question, results);
+        return answer == null || answer.isBlank() ? new LeadAgent().synthesize(question, results) : answer;
     }
 
     private List<SwarmSubtask> directSubtasks(String question, List<String> agents) {
@@ -111,6 +153,7 @@ public class SwarmCoordinator {
         sharedContextStore.put(sessionId, "route.requiresLeadAgent", String.valueOf(decision.requiresLeadAgent()));
         String nluStatus = switch (decision.reason()) {
             case "nlu_unavailable" -> "unavailable";
+            case "nlu_disabled" -> "disabled";
             case "emergency_rule" -> "skipped_emergency";
             default -> "completed";
         };
@@ -123,7 +166,7 @@ public class SwarmCoordinator {
         SwarmSubtask assignedSubtask = subtaskFromSharedContext(request.sessionId(), subtask);
         MedicalAgent agent = agentById(assignedSubtask.assignedAgent());
         if (agent == null) {
-            agent = consultationAgent;
+            throw new SecurityException("UNKNOWN_AGENT");
         }
         sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".status", "running");
         AgentRequest subtaskRequest = new AgentRequest(
@@ -144,10 +187,12 @@ public class SwarmCoordinator {
             sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".delegatedTo", delegation.targetAgent());
             sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".delegatedTask", delegation.task());
             return runDelegatedSubtask(request, assignedSubtask, delegation);
+        } catch (SecurityException denied) {
+            throw denied;
         } catch (RuntimeException exception) {
             sharedContextStore.put(request.sessionId(), agent.agentId() + ".status", "failed");
             sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".status", "failed");
-            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".error", exception.getClass().getSimpleName());
+            sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".error", safeErrorCode(exception));
             AgentResult result = degradedResult(agent.agentId());
             sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".result", result.answer());
             sharedContextStore.put(request.sessionId(), "contribution." + assignedSubtask.id() + ".agent", result.agentId());
@@ -192,6 +237,10 @@ public class SwarmCoordinator {
             SwarmSubtask sourceSubtask,
             AgentDelegationRequest delegation
     ) {
+        Object allowed = request.context().get("security.allowedAgents");
+        if (!(allowed instanceof Set<?> set) || !set.contains(delegation.targetAgent())) {
+            throw new SecurityException("USER_AGENT_GRANT_MISSING");
+        }
         MedicalAgent targetAgent = agentById(delegation.targetAgent());
         if (targetAgent == null || delegation.targetAgent().equals(sourceSubtask.assignedAgent())) {
             return degradedResult(delegation.sourceAgent());
@@ -271,5 +320,24 @@ public class SwarmCoordinator {
             return researchAgent;
         }
         return null;
+    }
+
+    private String safeErrorCode(RuntimeException exception) {
+        String message = exception.getMessage();
+        if (message != null && message.matches("LLM_[A-Z_]+")) return message;
+        Throwable cause = exception.getCause();
+        if (cause != null && cause.getMessage() != null && cause.getMessage().matches("LLM_[A-Z_]+")) {
+            return cause.getMessage();
+        }
+        return exception.getClass().getSimpleName();
+    }
+
+    private void requireAllowed(String agentId, Set<String> allowedAgents) {
+        if (agentById(agentId) == null) {
+            throw new SecurityException("UNKNOWN_AGENT");
+        }
+        if (!allowedAgents.contains(agentId)) {
+            throw new SecurityException("NO_AUTHORIZED_AGENT");
+        }
     }
 }
