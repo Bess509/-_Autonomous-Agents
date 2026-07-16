@@ -4,6 +4,8 @@ export type ToolTrace={id:string;name:string;status:TraceStatus;result?:string}
 export type RunState={
  status:'idle'|'running'|'finished'|'error'
  text:string
+ thinking:string
+ thinkingStatus?:TraceStatus
  steps:StepTrace[]
  tools:ToolTrace[]
  route?:string
@@ -15,7 +17,7 @@ export type RunState={
  error?:string
 }
 
-export const initialState:RunState={status:'idle',text:'',steps:[],tools:[],agents:[],seenEvents:[],endedMessages:[]}
+export const initialState:RunState={status:'idle',text:'',thinking:'',steps:[],tools:[],agents:[],seenEvents:[],endedMessages:[]}
 
 const stableEventId=(event:any)=>String(event.eventId??`${event.runId??''}:${event.sequence??event.timestamp??''}:${event.type}:${event.messageId??event.toolCallId??event.stepName??''}`)
 const traceId=(event:any,prefix:string)=>String(event.toolCallId??event.eventId??`${prefix}-${event.timestamp??''}-${event.stepName??''}`)
@@ -47,6 +49,12 @@ export function reduceEvent(state:RunState,event:any):RunState{
    if(state.endedMessages.includes(String(event.messageId)))return{...state,seenEvents:seen}
    if(state.messageId&&event.messageId&&state.messageId!==event.messageId)return{...state,seenEvents:seen}
    return{...state,seenEvents:seen,messageId:event.messageId??state.messageId,text:state.text+(event.delta??'')}
+  case'THINKING_START':
+   return{...state,seenEvents:seen,thinkingStatus:'running'}
+  case'THINKING_CONTENT':
+   return{...state,seenEvents:seen,thinkingStatus:'running',thinking:state.thinking+(event.delta??'')}
+  case'THINKING_END':
+   return{...state,seenEvents:seen,thinkingStatus:'finished'}
   case'TEXT_MESSAGE_END':
    return{...state,seenEvents:seen,endedMessages:[...new Set([...state.endedMessages,String(event.messageId)])]}
   case'STATE_SNAPSHOT':

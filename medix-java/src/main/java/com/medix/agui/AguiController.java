@@ -9,44 +9,70 @@ import com.medix.security.AppPrincipal;
 import com.medix.swarm.SwarmCoordinator;
 import com.medix.swarm.SwarmResponse;
 import java.time.Instant;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+import org.springframework.transaction.annotation.Transactional;
 
 @RestController
 @RequestMapping("/api/v1")
 public class AguiController {
     public record ThreadView(String id, UUID ownerUserId, String title, Instant createdAt, Instant updatedAt) {}
+    public record ThreadDeleteRequest(List<String> threadIds) {}
+    public record DeleteResult(int deleted) {}
 
     private final PermissionService permissions;
     private final SwarmCoordinator coordinator;
     private final ObjectMapper mapper;
     private final JdbcTemplate jdbc;
+    private final DeepSeekStreamingService deepSeek;
 
-    public AguiController(PermissionService permissions, SwarmCoordinator coordinator, JdbcTemplate jdbc) {
+    @Autowired
+    public AguiController(PermissionService permissions, SwarmCoordinator coordinator, JdbcTemplate jdbc,
+                          DeepSeekStreamingService deepSeek) {
         this.permissions = permissions;
         this.coordinator = coordinator;
         this.mapper = new ObjectMapper();
         this.jdbc = jdbc;
+        this.deepSeek = deepSeek;
+    }
+
+    public AguiController(PermissionService permissions, SwarmCoordinator coordinator, JdbcTemplate jdbc) {
+        this(permissions, coordinator, jdbc,
+                new DeepSeekStreamingService(false, "", "https://api.deepseek.com", "deepseek-v4-flash", new ObjectMapper()));
     }
 
     @PostMapping(value = "/agui", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public ResponseEntity<String> run(@RequestBody RunAgentInput input, Authentication auth) {
+    public ResponseEntity<StreamingResponseBody> runHttp(@RequestBody RunAgentInput input, Authentication auth,
+                                                          HttpServletResponse servletResponse) {
+        // Tomcat otherwise retains small SSE frames in its response buffer until the Agent work has completed.
+        servletResponse.setBufferSize(1);
+        return run(input, auth);
+    }
+
+    public ResponseEntity<StreamingResponseBody> run(RunAgentInput input, Authentication auth) {
         AppPrincipal user = (AppPrincipal) auth.getPrincipal();
         validate(input);
         ThreadView thread = ownedThreadOrCreate(input.threadId(), user, input.latestUserMessage());
@@ -73,56 +99,89 @@ public class AguiController {
             throw new Forbidden(decision.reasonCode());
         }
 
-        String payload;
+        StreamingResponseBody body = output -> streamRun(output, input, user);
+        return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM)
+                .header("Cache-Control", "no-cache, no-transform")
+                .header("X-Accel-Buffering", "no")
+                .body(body);
+    }
+
+    private void streamRun(OutputStream output, RunAgentInput input, AppPrincipal user) throws IOException {
+        StringBuilder payload = new StringBuilder();
         EventSequence sequence = new EventSequence(input.runId());
         try {
-            List<Map<String, Object>> events = new ArrayList<>();
-            events.add(sequence.event("RUN_STARTED", Map.of("threadId", input.threadId(), "runId", input.runId())));
-            events.add(sequence.event("STEP_STARTED", Map.of("stepName", "安全检查")));
-            events.add(sequence.event("STEP_FINISHED", Map.of("stepName", "安全检查")));
+            primeSse(output);
+            emit(output, payload, sequence.event("RUN_STARTED", Map.of("threadId", input.threadId(), "runId", input.runId())));
+            emit(output, payload, sequence.event("STEP_STARTED", Map.of("stepName", "安全检查")));
+            emit(output, payload, sequence.event("STEP_FINISHED", Map.of("stepName", "安全检查")));
+            emit(output, payload, sequence.event("STEP_STARTED", Map.of("stepName", "多 Agent 分析")));
             SwarmResponse response = coordinator.processDetailed(new AgentRequest(input.latestUserMessage(), input.threadId(),
                     Map.of("runId", input.runId(), "permission.capabilities", permissions.matrix(),
                             "security.userId", user.id().toString(), "security.principal", user)), permissions.agents(user));
+            emit(output, payload, sequence.event("STEP_FINISHED", Map.of("stepName", "多 Agent 分析")));
             String routeStep = "路由 · " + response.decision().reason();
-            events.add(sequence.event("STEP_STARTED", Map.of("stepName", routeStep)));
-            events.add(sequence.event("STEP_FINISHED", Map.of("stepName", routeStep)));
+            emit(output, payload, sequence.event("STEP_STARTED", Map.of("stepName", routeStep)));
+            emit(output, payload, sequence.event("STEP_FINISHED", Map.of("stepName", routeStep)));
             for (var result : response.agentResults()) {
-                events.add(sequence.event("STEP_STARTED", Map.of("stepName", result.agentId())));
+                emit(output, payload, sequence.event("STEP_STARTED", Map.of("stepName", result.agentId())));
                 for (String skill : result.skillCalls()) {
                     PermissionService.Decision capability = permissions.canExecute(user, result.agentId(), skill, input.runId());
                     if (!capability.allowed()) throw new SecurityException(capability.reasonCode());
                     String callId = input.runId() + ":tool:" + sequence.nextNumber();
-                    events.add(sequence.event("TOOL_CALL_START", Map.of("toolCallId", callId, "toolCallName", skill)));
-                    events.add(sequence.event("TOOL_CALL_ARGS", Map.of("toolCallId", callId, "delta", "{}")));
-                    events.add(sequence.event("TOOL_CALL_END", Map.of("toolCallId", callId)));
-                    events.add(sequence.event("TOOL_CALL_RESULT", Map.of("toolCallId", callId, "messageId", callId + ":result",
-                            "content", "能力调用已完成", "role", "tool")));
+                    emit(output, payload, sequence.event("TOOL_CALL_START", Map.of("toolCallId", callId, "toolCallName", skill)));
+                    emit(output, payload, sequence.event("TOOL_CALL_ARGS", Map.of("toolCallId", callId, "delta", "{}")));
+                    emit(output, payload, sequence.event("TOOL_CALL_END", Map.of("toolCallId", callId)));
+                    emit(output, payload, sequence.event("TOOL_CALL_RESULT", Map.of("toolCallId", callId,
+                            "messageId", callId + ":result", "content", "能力调用已完成", "role", "tool")));
                 }
-                events.add(sequence.event("STEP_FINISHED", Map.of("stepName", result.agentId())));
+                emit(output, payload, sequence.event("STEP_FINISHED", Map.of("stepName", result.agentId())));
             }
-            String messageId = input.runId() + ":assistant";
-            events.add(sequence.event("TEXT_MESSAGE_START", Map.of("messageId", messageId, "role", "assistant")));
-            for (String part : chunks(response.answer(), 80)) {
-                events.add(sequence.event("TEXT_MESSAGE_CONTENT", Map.of("messageId", messageId, "delta", part)));
-            }
-            events.add(sequence.event("TEXT_MESSAGE_END", Map.of("messageId", messageId)));
-            events.add(sequence.event("STATE_SNAPSHOT", Map.of("snapshot", Map.of(
-                    "route", response.decision().reason(),
-                    "agents", response.decision().requiredAgents(),
-                    "skills", response.agentResults().stream().flatMap(result -> result.skillCalls().stream()).distinct().toList()
-            ))));
-            events.add(sequence.event("RUN_FINISHED", Map.of("threadId", input.threadId(), "runId", input.runId(),
+            streamAnswer(output, payload, sequence, input, response);
+            emit(output, payload, sequence.event("STATE_SNAPSHOT", Map.of("snapshot", Map.of(
+                    "route", response.decision().reason(), "agents", response.decision().requiredAgents(),
+                    "skills", response.agentResults().stream().flatMap(result -> result.skillCalls().stream()).distinct().toList()))));
+            emit(output, payload, sequence.event("RUN_FINISHED", Map.of("threadId", input.threadId(), "runId", input.runId(),
                     "outcome", Map.of("type", "success"))));
-            payload = encode(events);
-            saveResult(input.runId(), "COMPLETED", payload);
+            saveResult(input.runId(), "COMPLETED", payload.toString());
         } catch (SecurityException denied) {
-            payload = encode(List.of(sequence.event("RUN_ERROR", Map.of("message", "能力权限不足", "code", denied.getMessage()))));
-            saveResult(input.runId(), "DENIED", payload);
-        } catch (RuntimeException failure) {
-            payload = encode(List.of(sequence.event("RUN_ERROR", Map.of("message", "运行失败，请稍后重试", "code", "RUN_FAILED"))));
-            saveResult(input.runId(), "FAILED", payload);
+            emit(output, payload, sequence.event("RUN_ERROR", Map.of("message", "能力权限不足", "code", denied.getMessage())));
+            saveResult(input.runId(), "DENIED", payload.toString());
+        } catch (Exception failure) {
+            emit(output, payload, sequence.event("RUN_ERROR", Map.of("message", "运行失败，请稍后重试", "code", "RUN_FAILED")));
+            saveResult(input.runId(), "FAILED", payload.toString());
         }
-        return sse(payload);
+    }
+
+    private void streamAnswer(OutputStream output, StringBuilder payload, EventSequence sequence,
+                              RunAgentInput input, SwarmResponse response) throws Exception {
+        String messageId = input.runId() + ":assistant";
+        String thinkingId = input.runId() + ":thinking";
+        emit(output, payload, sequence.event("THINKING_START", Map.of("messageId", thinkingId)));
+        emit(output, payload, sequence.event("TEXT_MESSAGE_START", Map.of("messageId", messageId, "role", "assistant")));
+        if (deepSeek.enabled()) {
+            boolean[] thinkingEnded = {false};
+            deepSeek.stream(input.latestUserMessage(), response.answer(), delta -> {
+                try {
+                    if (!delta.reasoning().isEmpty())
+                        emit(output, payload, sequence.event("THINKING_CONTENT", Map.of("messageId", thinkingId, "delta", delta.reasoning())));
+                    if (!delta.content().isEmpty()) {
+                        if (!thinkingEnded[0]) {
+                            emit(output, payload, sequence.event("THINKING_END", Map.of("messageId", thinkingId)));
+                            thinkingEnded[0] = true;
+                        }
+                        emit(output, payload, sequence.event("TEXT_MESSAGE_CONTENT", Map.of("messageId", messageId, "delta", delta.content())));
+                    }
+                } catch (IOException failure) { throw new StreamWriteFailure(failure); }
+            });
+            if (!thinkingEnded[0]) emit(output, payload, sequence.event("THINKING_END", Map.of("messageId", thinkingId)));
+        } else {
+            emit(output, payload, sequence.event("THINKING_CONTENT", Map.of("messageId", thinkingId,
+                    "delta", "已完成意图路由、医疗安全检查和多 Agent 证据整合。")));
+            emit(output, payload, sequence.event("THINKING_END", Map.of("messageId", thinkingId)));
+            for (String part : chunks(response.answer(), 80))
+                emit(output, payload, sequence.event("TEXT_MESSAGE_CONTENT", Map.of("messageId", messageId, "delta", part)));
+        }
+        emit(output, payload, sequence.event("TEXT_MESSAGE_END", Map.of("messageId", messageId)));
     }
 
     @GetMapping("/me/threads")
@@ -141,6 +200,39 @@ public class AguiController {
                 SELECT id, owner_user_id, title, created_at, updated_at
                 FROM conversation_threads WHERE id = ? AND owner_user_id = ?
                 """, (rs, row) -> thread(rs), id, owner).stream().findFirst().orElseThrow(() -> new Forbidden("THREAD_NOT_OWNED"));
+    }
+
+    @DeleteMapping("/me/threads/{id}")
+    @Transactional
+    public DeleteResult deleteThread(@PathVariable String id, Authentication authentication) {
+        return deleteThreads(List.of(id), ((AppPrincipal) authentication.getPrincipal()).id());
+    }
+
+    @DeleteMapping("/me/threads")
+    @Transactional
+    public DeleteResult deleteThreads(@RequestBody ThreadDeleteRequest request, Authentication authentication) {
+        if (request == null) throw new Invalid();
+        return deleteThreads(request.threadIds(), ((AppPrincipal) authentication.getPrincipal()).id());
+    }
+
+    private DeleteResult deleteThreads(List<String> requestedIds, UUID owner) {
+        if (requestedIds == null || requestedIds.isEmpty() || requestedIds.size() > 100) throw new Invalid();
+        List<String> ids = requestedIds.stream().filter(id -> id != null && !id.isBlank()).distinct().toList();
+        if (ids.isEmpty() || ids.size() != requestedIds.size()) throw new Invalid();
+        for (String id : ids) {
+            Boolean owned = jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM conversation_threads WHERE id = ? AND owner_user_id = ?)",
+                    Boolean.class, id, owner);
+            if (!Boolean.TRUE.equals(owned)) throw new Forbidden("THREAD_NOT_OWNED");
+            Integer running = jdbc.queryForObject("SELECT count(*) FROM agent_runs WHERE thread_id = ? AND status = 'RUNNING'",
+                    Integer.class, id);
+            if (running != null && running > 0) throw new RunInProgress();
+        }
+        for (String id : ids) {
+            jdbc.update("DELETE FROM conversation_summaries WHERE session_id = ?", id);
+            jdbc.update("DELETE FROM agent_runs WHERE thread_id = ?", id);
+            jdbc.update("DELETE FROM conversation_threads WHERE id = ? AND owner_user_id = ?", id, owner);
+        }
+        return new DeleteResult(ids.size());
     }
 
     private ThreadView ownedThreadOrCreate(String id, AppPrincipal owner, String title) {
@@ -193,12 +285,35 @@ public class AguiController {
                 rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant());
     }
 
-    private ResponseEntity<String> sse(String payload) {
-        return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).body(payload);
+    private ResponseEntity<StreamingResponseBody> sse(String payload) {
+        return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM)
+                .header("Cache-Control", "no-cache, no-transform")
+                .header("X-Accel-Buffering", "no")
+                .body(output -> {
+                    primeSse(output);
+                    output.write(payload.getBytes(StandardCharsets.UTF_8));
+                    output.flush();
+                });
+    }
+
+    private void emit(OutputStream output, StringBuilder payload, Map<String, Object> event) throws IOException {
+        String frame = encode(List.of(event));
+        payload.append(frame);
+        output.write(frame.getBytes(StandardCharsets.UTF_8));
+        output.flush();
+    }
+
+    private void primeSse(OutputStream output) throws IOException {
+        // Tomcat's connector retains sub-buffer responses even after flush(); an SSE comment crosses that
+        // boundary without becoming an AG-UI event, so RUN_STARTED reaches the browser before model work.
+        output.write((":" + " ".repeat(8192) + "\n\n").getBytes(StandardCharsets.UTF_8));
+        output.flush();
     }
 
     private void validate(RunAgentInput input) {
-        if (input == null || blank(input.threadId()) || blank(input.runId()) || blank(input.latestUserMessage())) throw new Invalid();
+        if (input == null || blank(input.threadId()) || blank(input.runId()) || blank(input.latestUserMessage())
+                || input.threadId().length() > 120 || input.runId().length() > 120
+                || input.latestUserMessage().length() > 4000) throw new Invalid();
     }
 
     private boolean blank(String value) {
@@ -241,6 +356,10 @@ public class AguiController {
             chunks.add(value.substring(offset, Math.min(offset + size, value.length())));
         }
         return chunks;
+    }
+
+    private static final class StreamWriteFailure extends RuntimeException {
+        private StreamWriteFailure(IOException cause) { super(cause); }
     }
 
     private record PrincipalAuthentication(AppPrincipal principal) implements Authentication {

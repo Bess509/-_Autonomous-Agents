@@ -65,6 +65,8 @@ public final class SpringAiAgentScopeChatModel extends ChatModelBase {
         OpenAiChatOptions defaults = requireCompatibleDefaults(delegate, expectedModel);
         Map<String, Object> extraBody = new LinkedHashMap<>();
         if (defaults.getExtraBody() != null) extraBody.putAll(defaults.getExtraBody());
+        // Tool-loop calls stay non-thinking because reasoning_content must be replayed across tool turns.
+        // The AG-UI final synthesis uses DeepSeekStreamingService and exposes thinking safely and losslessly.
         extraBody.put("thinking", Map.of("type", "disabled"));
         // Spring AI 2.0.0 injects parameters.strict=true while converting callbacks and writes a second
         // top-level tools field when extraBody.tools is also present. Send only the normalized provider schemas;

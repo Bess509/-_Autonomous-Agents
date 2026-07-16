@@ -341,6 +341,8 @@ try {
             $secureKey = ConvertTo-SecureString $script:Sentinel -AsPlainText -Force
         } elseif ($script:IsTest) {
             $secureKey = ConvertTo-SecureString 'test-only-nonsecret' -AsPlainText -Force
+        } elseif (-not [string]::IsNullOrWhiteSpace($env:MEDIX_OPENAI_API_KEY)) {
+            $secureKey = ConvertTo-SecureString $env:MEDIX_OPENAI_API_KEY -AsPlainText -Force
         } else {
             $secureKey = Read-Host 'DeepSeek API Key (hidden)' -AsSecureString
         }

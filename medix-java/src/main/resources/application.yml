@@ -23,11 +23,10 @@ spring:
   ai:
     openai:
       api-key: ${MEDIX_OPENAI_API_KEY:}
-      base-url: ${MEDIX_OPENAI_BASE_URL:https://ark.cn-beijing.volces.com/api/v3}
+      base-url: ${MEDIX_OPENAI_BASE_URL:https://api.deepseek.com}
       chat:
         options:
-          model: ${MEDIX_OPENAI_MODEL:doubao-seed-1-6-flash-250828}
-          temperature: 0.7
+          model: ${MEDIX_OPENAI_MODEL:deepseek-v4-flash}
 
 management:
   health:

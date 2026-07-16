@@ -8,6 +8,15 @@ import{initialState,parseSse,reduceEvent}from'./agui'
 import{AssistantAnswerText}from'./main'
 
 describe('AG-UI reducer',()=>{
+ it('streams DeepSeek thinking separately from the answer',()=>{
+  let state=reduceEvent(initialState,{type:'RUN_STARTED',runId:'r',eventId:'r:1'})
+  state=reduceEvent(state,{type:'THINKING_START',runId:'r',eventId:'r:2',messageId:'r:thinking'})
+  state=reduceEvent(state,{type:'THINKING_CONTENT',runId:'r',eventId:'r:3',messageId:'r:thinking',delta:'分析证据'})
+  state=reduceEvent(state,{type:'THINKING_END',runId:'r',eventId:'r:4',messageId:'r:thinking'})
+  expect(state.thinking).toBe('分析证据')
+  expect(state.thinkingStatus).toBe('finished')
+  expect(state.text).toBe('')
+ })
  it('streams text and ignores unknown events',()=>{
   let state=reduceEvent(initialState,{type:'RUN_STARTED'})
   state=reduceEvent(state,{type:'TEXT_MESSAGE_CONTENT',delta:'你好'})

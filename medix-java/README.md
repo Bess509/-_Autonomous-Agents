@@ -22,6 +22,7 @@ MediX Java 是一个基于 Spring Boot 的多 Agent 医疗问答平台，围绕�
 - **Swarm 路由**：简单问题走单 Agent 快速通道，复杂/高危/循证类问题由 `SwarmCoordinator` 拆解为多个子任务，并通过 `CompletableFuture` 并行执行。
 - **记忆管理**：短期记忆通过 `ShortTermMemory` 维护会话上下文，长期记忆通过 PostgreSQL + pgvector 存储会话摘要并支持相似案例召回。
 - **Harness 约束与输出修复**：通过 YAML 配置限制不同 Agent 的可调用 Skills，并使用 AOP 校验实际调用；`OutputRepairService` 自动补全免责声明、高危就医提醒和修正绝对化诊断表述。
+- **账户与会话管理**：前端支持注册、登录和修改密码；登录用户可管理自己的历史会话，并单独或批量删除聊天记录。
 
 ## 架构概览
 
@@ -102,11 +103,11 @@ mvn spring-boot:run
 `MEDIX_VECTOR_STORE_ENABLED=false` 时知识库使用显式的本地词法降级；准备好 PgVector 与 EmbeddingModel 后可开启向量检索。
 默认 `MEDIX_NLU_ENABLED=true`，系统连接本机 Ollama 的 `qwen2.5:1.5b` 完成低成本意图识别。需要临时跳过小模型并回退到 `LeadAgent` 时，可设置 `MEDIX_NLU_ENABLED=false`。
 
-当前 AG-UI 接口保持既有事件格式，但响应仍是运行结束后发送的缓冲 SSE；真实首事件流式输出、断连取消和 live provider tool-call 兼容性仍属于发布前验收项。
+AG-UI 接口使用真实的 `StreamingResponseBody` SSE：运行事件写入后立即 `flush`，DeepSeek live 最终合成会把 provider 返回的 `reasoning_content` 映射为 `THINKING_START/CONTENT/END`，把 `content` 映射为 `TEXT_MESSAGE_START/CONTENT/END`。前端分别增量渲染可折叠思考区和最终回答；离线模式仍提供可审计的处理摘要事件。
 
 ### DeepSeek 一次性 live 运行
 
-默认仍为 `MEDIX_LIVE_LLM=false`，且 API key 默认值为空。启用时仅在当前 Java 进程环境设置
+直接双击 `windows-launcher/启动-MediX.bat` 默认进入 DeepSeek live 模式；API key 优先从当前进程环境继承，未设置时由 PowerShell 隐藏输入。直接运行 Maven 时 `MEDIX_LIVE_LLM` 仍默认关闭。启用时仅在当前 Java 进程环境设置
 `MEDIX_LIVE_LLM=true`、`MEDIX_OPENAI_MODEL=deepseek-v4-flash`、
 `MEDIX_OPENAI_BASE_URL=https://api.deepseek.com` 和 `MEDIX_OPENAI_API_KEY=<redacted>`；不要使用
 `setx`、`.env`、YAML 或命令行参数保存密钥，也不要启用会记录请求头的 HTTP debug。
@@ -119,7 +120,7 @@ base URL 必须先以根地址通过本应用使用的 Spring AI 客户端探测
 callback schema 与 `extraBody.tools` 会在原始 HTTP 中产生两个同名顶层 `tools` 字段。当前适配器继承并冻结
 provider 模型与连接选项，只由规范化的 request-scoped `extraBody.tools` 生成一个顶层字段，工具轮次显式关闭
 thinking，并刻意不发送 `temperature`/`tool_choice`/`parallel_tool_calls`/`stream`；实际工具执行和
-tool result 回送仍只由 AgentScope Toolkit 负责。
+tool result 回送仍只由 AgentScope Toolkit 负责。工具循环完成后，AG-UI 使用 provider 原生 SSE 做一次 thinking-enabled 的安全最终整理，从而完整保留 DeepSeek 的两类增量字段。
 
 Ollama 的 `MEDIX_NLU_*` 配置仅用于路由分类；Worker、工具后续轮次和 live 最终合成均使用上述
 OpenAI-compatible provider。回滚时启动新进程并设置 `MEDIX_LIVE_LLM=false`，同时清除该进程的
@@ -157,6 +158,13 @@ MEDIX_MINIO_ENABLED=false
 生产环境必须替换 JWT、bootstrap 账户、数据库、Redis 和 MinIO 的所有示例/默认密钥；应用在 production 模式下会拒绝默认 JWT secret 与默认管理员密码。
 
 ## API 示例
+
+账户与会话管理接口：
+
+- `POST /api/v1/auth/register`：注册并建立登录会话。
+- `PUT /api/v1/auth/password`：验证当前密码后修改密码，并退出当前会话。
+- `DELETE /api/v1/me/threads/{threadId}`：删除当前用户的单个会话。
+- `DELETE /api/v1/me/threads`：通过 `{"threadIds":[...]}` 批量删除当前用户的会话（最多 100 个）。
 
 医疗问答：
 

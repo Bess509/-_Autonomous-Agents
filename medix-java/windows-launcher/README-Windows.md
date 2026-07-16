@@ -4,9 +4,9 @@
 
 ## 启动
 
-双击 `启动-MediX.bat`。启动器会检查 Java 21、运行载体、8080、PostgreSQL、Redis 和 Ollama，然后询问运行模式：
+双击 `启动-MediX.bat` 会默认进入 DeepSeek live 模式。启动器会检查 Java 21、运行载体、8080、PostgreSQL、Redis 和 Ollama，然后安全读取 API Key：优先继承当前进程的 `MEDIX_OPENAI_API_KEY`，未设置时使用隐藏输入。
 
-- 离线演示：不需要 API Key。
+- 离线演示：命令行传入 `-Mode Offline`，不需要 API Key。
 - DeepSeek live：Key 通过 PowerShell 隐藏输入，只由启动器的 Java/Maven 子进程临时继承；不写入命令行、日志、状态文件或磁盘凭据。
 
 默认推荐 Maven 运行当前源码。若 `target` 中只有一个有效的 `medix-java-*.jar`（不含 `original-*`），可以显式选择 JAR。

@@ -7,10 +7,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Locale;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class IdentityService {
@@ -68,6 +71,59 @@ public class IdentityService {
                 ? Optional.of(account.principal())
                 : Optional.empty();
     }
+
+    @Transactional
+    public AppPrincipal register(String requestedUsername, String password, String requestedDisplayName) {
+        String username = normalizeUsername(requestedUsername);
+        String displayName = requestedDisplayName == null ? "" : requestedDisplayName.trim();
+        validatePassword(password);
+        if (displayName.length() < 2 || displayName.length() > 50) {
+            throw new IllegalArgumentException("显示名称需为 2–50 个字符");
+        }
+        UUID id = UUID.randomUUID();
+        try {
+            jdbc.update("""
+                    INSERT INTO app_users(id, username, password_hash, display_name, status)
+                    VALUES (?, ?, ?, ?, 'ACTIVE')
+                    """, id, username, encoder.encode(password), displayName);
+        } catch (DuplicateKeyException duplicate) {
+            throw new UsernameTakenException();
+        }
+        jdbc.update("INSERT INTO user_roles(user_id, role) VALUES (?, 'USER')", id);
+        grantAgent(id, "consultation_agent", null);
+        return find(username).orElseThrow(() -> new IllegalStateException("REGISTERED_USER_NOT_FOUND"));
+    }
+
+    @Transactional
+    public boolean changePassword(AppPrincipal principal, String currentPassword, String newPassword) {
+        if (principal == null) return false;
+        validatePassword(newPassword);
+        Account account = account(principal.username()).orElse(null);
+        if (account == null || !account.enabled() || !encoder.matches(currentPassword == null ? "" : currentPassword,
+                account.passwordHash())) return false;
+        if (encoder.matches(newPassword, account.passwordHash())) {
+            throw new IllegalArgumentException("新密码不能与当前密码相同");
+        }
+        return jdbc.update("UPDATE app_users SET password_hash = ?, updated_at = now() WHERE id = ?",
+                encoder.encode(newPassword), principal.id()) == 1;
+    }
+
+    private String normalizeUsername(String value) {
+        String username = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+        if (!username.matches("[a-z0-9_]{3,40}")) {
+            throw new IllegalArgumentException("账号需为 3–40 位小写字母、数字或下划线");
+        }
+        return username;
+    }
+
+    private void validatePassword(String password) {
+        if (password == null || password.length() < 8 || password.length() > 72
+                || !password.matches(".*[A-Za-z].*") || !password.matches(".*\\d.*")) {
+            throw new IllegalArgumentException("密码需为 8–72 位，并同时包含字母和数字");
+        }
+    }
+
+    public static class UsernameTakenException extends RuntimeException {}
 
     public Optional<AppPrincipal> find(String username) {
         return account(username).filter(Account::enabled).map(Account::principal);

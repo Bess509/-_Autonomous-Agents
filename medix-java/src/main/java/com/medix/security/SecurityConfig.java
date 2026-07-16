@@ -1,5 +1,6 @@
 package com.medix.security;
 
+import jakarta.servlet.DispatcherType;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -15,7 +16,8 @@ public class SecurityConfig {
     @Bean PasswordEncoder passwordEncoder(){ return new BCryptPasswordEncoder(); }
     @Bean SecurityFilterChain security(HttpSecurity http, JwtAuthenticationFilter filter) throws Exception {
         return http.csrf(c -> c.disable()).sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .authorizeHttpRequests(a -> a.requestMatchers("/api/v1/auth/login", "/actuator/health", "/error",
+                .authorizeHttpRequests(a -> a.dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll()
+                        .requestMatchers("/api/v1/auth/login", "/api/v1/auth/register", "/actuator/health", "/error",
                                 "/", "/index.html", "/favicon.ico", "/assets/**").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN").anyRequest().authenticated())
                 .exceptionHandling(e -> e.authenticationEntryPoint((q,r,x)->{r.setStatus(401);r.setContentType("application/json");r.getWriter().write("{\"code\":\"UNAUTHENTICATED\",\"message\":\"请先登录\"}");})

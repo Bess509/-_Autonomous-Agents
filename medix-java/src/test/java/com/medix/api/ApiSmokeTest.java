@@ -282,6 +282,107 @@ class ApiSmokeTest {
     }
 
     @Test
+    void registrationAndPasswordChangeAreAvailableEndToEnd() throws Exception {
+        String username = "user_" + System.nanoTime();
+        String initialPassword = "Health1234";
+        String newPassword = "Safer5678";
+        String registerBody = """
+                {"username":"%s","password":"%s","displayName":"新用户"}
+                """.formatted(username, initialPassword);
+        HttpRequest register = HttpRequest.newBuilder(uri("/api/v1/auth/register"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(registerBody)).build();
+        HttpResponse<String> registered = httpClient.send(register, HttpResponse.BodyHandlers.ofString());
+        assertThat(registered.statusCode()).isEqualTo(200);
+        assertThat(registered.body()).contains(username, "新用户", "USER");
+        String cookie = registered.headers().firstValue("Set-Cookie").orElseThrow().split(";", 2)[0];
+
+        HttpResponse<String> duplicate = httpClient.send(register, HttpResponse.BodyHandlers.ofString());
+        assertThat(duplicate.statusCode()).isEqualTo(409);
+        assertThat(duplicate.body()).contains("USERNAME_TAKEN");
+
+        HttpRequest wrongCurrent = HttpRequest.newBuilder(uri("/api/v1/auth/password"))
+                .header("Content-Type", "application/json").header("Cookie", cookie)
+                .PUT(HttpRequest.BodyPublishers.ofString("""
+                        {"currentPassword":"wrong-password","newPassword":"%s"}
+                        """.formatted(newPassword))).build();
+        assertThat(httpClient.send(wrongCurrent, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(400);
+
+        HttpRequest change = HttpRequest.newBuilder(uri("/api/v1/auth/password"))
+                .header("Content-Type", "application/json").header("Cookie", cookie)
+                .PUT(HttpRequest.BodyPublishers.ofString("""
+                        {"currentPassword":"%s","newPassword":"%s"}
+                        """.formatted(initialPassword, newPassword))).build();
+        HttpResponse<String> changed = httpClient.send(change, HttpResponse.BodyHandlers.ofString());
+        assertThat(changed.statusCode()).isEqualTo(200);
+        assertThat(changed.body()).contains("\"changed\":true");
+        assertThat(changed.headers().firstValue("Set-Cookie")).hasValueSatisfying(value ->
+                assertThat(value).contains("Max-Age=0"));
+
+        HttpRequest oldLogin = HttpRequest.newBuilder(uri("/api/v1/auth/login"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"username":"%s","password":"%s"}
+                        """.formatted(username, initialPassword))).build();
+        assertThat(httpClient.send(oldLogin, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(401);
+        assertThat(login(username, newPassword)).startsWith("MEDIX_SESSION=");
+        jdbc.update("DELETE FROM app_users WHERE username = ?", username);
+    }
+
+    @Test
+    void ownerCanDeleteSingleAndMultipleThreadsButCannotDeleteAnotherUsersThread() throws Exception {
+        String username = "cleanup_" + System.nanoTime();
+        String password = "Cleanup123";
+        HttpRequest register = HttpRequest.newBuilder(uri("/api/v1/auth/register"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"username":"%s","password":"%s","displayName":"清理测试"}
+                        """.formatted(username, password))).build();
+        HttpResponse<String> registration = httpClient.send(register, HttpResponse.BodyHandlers.ofString());
+        String cookie = registration.headers().firstValue("Set-Cookie").orElseThrow().split(";", 2)[0];
+        String suffix = String.valueOf(System.nanoTime());
+        String first = "delete-one-" + suffix;
+        String second = "delete-two-" + suffix;
+        String third = "delete-three-" + suffix;
+        for (String id : List.of(first, second, third)) {
+            HttpRequest create = HttpRequest.newBuilder(uri("/api/v1/agui"))
+                    .header("Content-Type", "application/json").header("Cookie", cookie)
+                    .POST(HttpRequest.BodyPublishers.ofString(aguiBody(id, "run-" + id, "consultation_agent"))).build();
+            assertThat(httpClient.send(create, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(200);
+        }
+
+        HttpRequest single = HttpRequest.newBuilder(uri("/api/v1/me/threads/" + first))
+                .header("Cookie", cookie).DELETE().build();
+        HttpResponse<String> singleResult = httpClient.send(single, HttpResponse.BodyHandlers.ofString());
+        assertThat(singleResult.statusCode()).isEqualTo(200);
+        assertThat(singleResult.body()).contains("\"deleted\":1");
+
+        String adminThread = "admin-owned-" + suffix;
+        HttpRequest adminCreate = HttpRequest.newBuilder(uri("/api/v1/agui"))
+                .header("Content-Type", "application/json").header("Cookie", login())
+                .POST(HttpRequest.BodyPublishers.ofString(aguiBody(adminThread, "run-" + adminThread, "consultation_agent"))).build();
+        assertThat(httpClient.send(adminCreate, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(200);
+        HttpRequest forbidden = HttpRequest.newBuilder(uri("/api/v1/me/threads/" + adminThread))
+                .header("Cookie", cookie).DELETE().build();
+        assertThat(httpClient.send(forbidden, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(403);
+
+        HttpRequest bulk = HttpRequest.newBuilder(uri("/api/v1/me/threads"))
+                .header("Content-Type", "application/json").header("Cookie", cookie)
+                .method("DELETE", HttpRequest.BodyPublishers.ofString("""
+                        {"threadIds":["%s","%s"]}
+                        """.formatted(second, third))).build();
+        HttpResponse<String> bulkResult = httpClient.send(bulk, HttpResponse.BodyHandlers.ofString());
+        assertThat(bulkResult.statusCode()).isEqualTo(200);
+        assertThat(bulkResult.body()).contains("\"deleted\":2");
+        HttpRequest remaining = HttpRequest.newBuilder(uri("/api/v1/me/threads")).header("Cookie", cookie).GET().build();
+        assertThat(httpClient.send(remaining, HttpResponse.BodyHandlers.ofString()).body())
+                .doesNotContain(first, second, third);
+        jdbc.update("DELETE FROM agent_runs WHERE thread_id = ?", adminThread);
+        jdbc.update("DELETE FROM conversation_threads WHERE id = ?", adminThread);
+        jdbc.update("DELETE FROM app_users WHERE username = ?", username);
+    }
+
+    @Test
     void disablingAccountInvalidatesExistingJwtOnNextRequest() throws Exception {
         String demoCookie = login("demo", "user-change-me");
         jdbc.update("UPDATE app_users SET status = 'DISABLED' WHERE username = 'demo'");

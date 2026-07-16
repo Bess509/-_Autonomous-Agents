@@ -263,8 +263,16 @@ class AgentScopeRuntimeAdapterTest {
                 new RunAgentInput.Message("m1", "user", "tool failure")), List.of(), List.of(),
                 Map.of("agentId", "consultation_agent"));
 
-        String payload = new AguiController(permissions, coordinator, jdbc)
+        var stream = new AguiController(permissions, coordinator, jdbc)
                 .run(input, authentication).getBody();
+        var bytes = new java.io.ByteArrayOutputStream();
+        assertThat(stream).isNotNull();
+        try {
+            stream.writeTo(bytes);
+        } catch (java.io.IOException failure) {
+            throw new java.io.UncheckedIOException(failure);
+        }
+        String payload = bytes.toString(java.nio.charset.StandardCharsets.UTF_8);
 
         assertThat(payload).contains("RUN_ERROR", "RUN_FAILED", "运行失败，请稍后重试")
                 .doesNotContain("RUN_FINISHED", "sensitive-tool-detail");
