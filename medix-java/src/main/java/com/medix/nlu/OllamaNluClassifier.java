@@ -4,17 +4,20 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.http.HttpClient;
 import java.util.EnumMap;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Component
 public class OllamaNluClassifier implements NluClassifier {
+    private static final Logger log = LoggerFactory.getLogger(OllamaNluClassifier.class);
     private static final String SYSTEM_PROMPT = """
             你是确定性的中文医疗意图路由器。分别判断用户是否明确需要以下能力：
             HEALTH_CONSULTATION=一般健康科普或身份询问；
@@ -53,6 +56,7 @@ public class OllamaNluClassifier implements NluClassifier {
             Map<String, Object> body = Map.of(
                     "model", properties.model(),
                     "stream", false,
+                    "think", false,
                     "format", responseFormat(),
                     "options", Map.of("temperature", 0),
                     "messages", new Object[]{
@@ -60,7 +64,9 @@ public class OllamaNluClassifier implements NluClassifier {
                             Map.of("role", "user", "content", text == null ? "" : text)
                     }
             );
-            String responseBody = client.post().uri("/api/chat").body(body).retrieve().body(String.class);
+            String responseBody = CompletableFuture.supplyAsync(() ->
+                    client.post().uri("/api/chat").body(body).retrieve().body(String.class))
+                    .get(properties.timeout().toMillis(), TimeUnit.MILLISECONDS);
             JsonNode response;
             try {
                 response = objectMapper.readTree(responseBody);
@@ -70,10 +76,16 @@ public class OllamaNluClassifier implements NluClassifier {
             if (response == null || !response.path("message").path("content").isTextual()) {
                 throw new NluClassificationException("Ollama response has no message.content");
             }
-            return parse(response.path("message").path("content").textValue());
+            NluResult result = parse(response.path("message").path("content").textValue());
+            log.info("[NLU] model={} probabilities={}", properties.model(), result.probabilities());
+            return result;
         } catch (NluClassificationException exception) {
             throw exception;
-        } catch (RuntimeException exception) {
+        } catch (java.util.concurrent.TimeoutException exception) {
+            log.warn("[FALLBACK] component=NLU reason=ollama_timeout timeout={}", properties.timeout());
+            throw new NluClassificationException("Ollama NLU request timed out after " + properties.timeout(), exception);
+        } catch (Exception exception) {
+            log.warn("[FALLBACK] component=NLU reason=ollama_failure type={}", exception.getClass().getSimpleName());
             throw new NluClassificationException("Ollama NLU request failed", exception);
         }
     }
@@ -81,27 +93,20 @@ public class OllamaNluClassifier implements NluClassifier {
     NluResult parse(String content) {
         try {
             JsonNode root = objectMapper.readTree(content);
-            if (!root.isObject() || root.size() != 1 || !root.has("probabilities")) {
-                throw new NluClassificationException("NLU JSON must contain only probabilities");
-            }
-            JsonNode values = root.get("probabilities");
-            Set<String> expected = Set.of(IntentLabel.values()).stream().map(Enum::name).collect(Collectors.toSet());
-            if (!values.isObject() || values.size() != expected.size()) {
-                throw new NluClassificationException("NLU JSON must contain exactly six labels");
-            }
+            if (!root.isObject()) throw new NluClassificationException("NLU JSON must be an object");
+            JsonNode values = root.has("probabilities") ? root.get("probabilities") : root;
+            if (!values.isObject()) throw new NluClassificationException("NLU probabilities must be an object");
             EnumMap<IntentLabel, Double> probabilities = new EnumMap<>(IntentLabel.class);
-            Iterator<Map.Entry<String, JsonNode>> fields = values.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                if (!expected.contains(field.getKey()) || !field.getValue().isNumber()) {
-                    throw new NluClassificationException("Unknown label or non-numeric probability: " + field.getKey());
+            for (IntentLabel label : IntentLabel.values()) {
+                JsonNode value = values.get(label.name());
+                if (value == null || !value.isNumber()) continue;
+                double probability = value.doubleValue();
+                if (Double.isFinite(probability) && probability >= 0 && probability <= 1) {
+                    probabilities.put(label, probability);
                 }
-                double probability = field.getValue().doubleValue();
-                if (!Double.isFinite(probability) || probability < 0 || probability > 1) {
-                    throw new NluClassificationException("Probability out of range: " + field.getKey());
-                }
-                probabilities.put(IntentLabel.valueOf(field.getKey()), probability);
             }
+            if (probabilities.isEmpty()) throw new NluClassificationException("NLU response contains no valid intent probability");
+            for (IntentLabel label : IntentLabel.values()) probabilities.putIfAbsent(label, 0.0);
             return new NluResult(probabilities);
         } catch (NluClassificationException exception) {
             throw exception;

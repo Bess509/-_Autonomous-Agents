@@ -20,8 +20,8 @@ public class PermissionService {
     public record McpServer(UUID id, String name, String transport, String endpoint, boolean enabled) {}
 
     private static final Map<String, Set<String>> HARNESS = Map.of(
-            "consultation_agent", Set.of("search_knowledge", "recommend_lifestyle", "assess_risk"),
-            "diagnostic_agent", Set.of("assess_risk", "analyze_symptoms", "disease_code"),
+            "consultation_agent", Set.of("search_knowledge", "recommend_lifestyle", "assess_risk", "safe_medical_guidance"),
+            "diagnostic_agent", Set.of("assess_risk", "analyze_symptoms", "disease_code", "safe_medical_guidance"),
             "research_agent", Set.of("clinical_guideline", "deep_research")
     );
 

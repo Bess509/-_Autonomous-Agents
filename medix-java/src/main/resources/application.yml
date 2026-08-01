@@ -2,10 +2,15 @@ server:
   port: 8080
 
 spring:
+  mvc:
+    # DeepSeek's streamed final polish can legitimately exceed the MVC default 30-second async timeout.
+    async:
+      request-timeout: 180s
   config:
     import:
       - optional:classpath:agents/agent-constraints.yml
       - optional:classpath:agents/swarm-constraints.yml
+      - optional:file:./application-local.yml
   application:
     name: medix-java
   datasource:
@@ -27,6 +32,8 @@ spring:
       chat:
         options:
           model: ${MEDIX_OPENAI_MODEL:deepseek-v4-flash}
+          temperature: ${MEDIX_OPENAI_TEMPERATURE:0.2}
+          top-p: ${MEDIX_OPENAI_TOP_P:0.9}
 
 management:
   health:
@@ -47,8 +54,10 @@ medix:
     # MEDIX_NLU_ENABLED=false only when an explicit LeadAgent fallback is needed.
     enabled: ${MEDIX_NLU_ENABLED:true}
     base-url: ${MEDIX_NLU_BASE_URL:http://localhost:11434}
-    model: ${MEDIX_NLU_MODEL:qwen2.5:1.5b}
-    timeout: ${MEDIX_NLU_TIMEOUT:8s}
+    # Qwen first rewrites the contextual retrieval query, then classifies intent/risk for routing.
+    # Professional agents themselves remain on the separately configured DeepSeek API channel.
+    model: ${MEDIX_NLU_MODEL:qwen3.5:9b}
+    timeout: ${MEDIX_NLU_TIMEOUT:20s}
     confidence-threshold: ${MEDIX_NLU_CONFIDENCE_THRESHOLD:0.70}
     label-threshold: ${MEDIX_NLU_LABEL_THRESHOLD:0.55}
     ambiguity-margin: ${MEDIX_NLU_AMBIGUITY_MARGIN:0.10}
@@ -69,11 +78,21 @@ medix:
       duplicate-rate-threshold: ${MEDIX_MEMORY_DUPLICATE_RATE_THRESHOLD:0.2}
       average-length-threshold: ${MEDIX_MEMORY_AVERAGE_LENGTH_THRESHOLD:1000}
   features:
-    live-llm: ${MEDIX_LIVE_LLM:false}
-    redis: ${MEDIX_REDIS_ENABLED:true}
+    live-llm: ${MEDIX_LIVE_LLM:true}
+    redis: ${MEDIX_REDIS_ENABLED:false}
     minio: ${MEDIX_MINIO_ENABLED:false}
     reranker: ${MEDIX_RERANKER_ENABLED:true}
     vector-store: ${MEDIX_VECTOR_STORE_ENABLED:false}
+  rag:
+    enabled: ${MEDIX_RAG_ENABLED:true}
+    rerank-min-score: ${MEDIX_RAG_RERANK_MIN_SCORE:0.70}
+    embedding:
+      base-url: ${MEDIX_RAG_EMBEDDING_URL:http://localhost:11434}
+      model: ${MEDIX_RAG_EMBEDDING_MODEL:bge-m3}
+      dimensions: ${MEDIX_RAG_EMBEDDING_DIMENSIONS:1024}
+      timeout: ${MEDIX_RAG_EMBEDDING_TIMEOUT:15s}
+    import-file: ${MEDIX_RAG_IMPORT_FILE:}
+    import-batch-size: ${MEDIX_RAG_IMPORT_BATCH_SIZE:200}
   services:
     reranker-url: ${MEDIX_RERANKER_URL:http://localhost:8081/rerank}
     minio-endpoint: ${MEDIX_MINIO_ENDPOINT:http://localhost:9000}

@@ -9,6 +9,7 @@ type Thread={id:string;title:string;updatedAt:string}
 type AdminUser=User&{agents:string[]}
 type Capability={id:string;type:string;display_name:string;enabled:boolean}
 type McpServer={id:string;name:string;transport:string;endpoint:string;enabled:boolean}
+type ChatMessage={id:string;role:'user'|'assistant';content:string}
 const ALL_AGENTS=['consultation_agent','diagnostic_agent','research_agent']
 const AGENT_NAMES:Record<string,string>={consultation_agent:'健康咨询 Agent',diagnostic_agent:'症状风险 Agent',research_agent:'医学循证 Agent'}
 const TOOL_NAMES:Record<string,string>={search_knowledge:'知识库检索',recommend_lifestyle:'生活方式建议',assess_risk:'风险评估',analyze_symptoms:'症状分析',disease_code:'ICD-10 查询',clinical_guideline:'临床指南检索',deep_research:'深度医学研究'}
@@ -43,21 +44,32 @@ function Brand(){return <div className="brand"><span className="brand-mark">M</s
 
 function Workspace({user,logout}:{user:User;logout:()=>void}){
  const[agents,setAgents]=useState<Agent[]>([]),[threads,setThreads]=useState<Thread[]>([])
- const[state,setState]=useState<RunState>(initialState),[question,setQuestion]=useState(''),[lastQuestion,setLastQuestion]=useState('')
+ const[state,setState]=useState<RunState>(initialState),[question,setQuestion]=useState(''),[messages,setMessages]=useState<ChatMessage[]>([])
  const[threadId,setThreadId]=useState<string>(()=>crypto.randomUUID()),[page,setPage]=useState<'chat'|'permissions'|'account'|'admin'>('chat')
  const[managing,setManaging]=useState(false),[selectedThreads,setSelectedThreads]=useState<Set<string>>(new Set()),[threadNotice,setThreadNotice]=useState('')
  const refresh=()=>Promise.all([api('/api/v1/me/agents').then(r=>r.json()).then(setAgents),api('/api/v1/me/threads').then(r=>r.json()).then(setThreads)])
  useEffect(()=>{refresh()},[])
+ useEffect(()=>{
+  if(!threads.some(item=>item.id===threadId))return
+  api(`/api/v1/me/threads/${encodeURIComponent(threadId)}/messages`).then(response=>response.json())
+   .then(stored=>setMessages(stored.map((message:{id:number;role:'user'|'assistant';content:string})=>({id:String(message.id),role:message.role,content:message.content}))))
+   .catch(()=>setMessages([]))
+ },[threadId,threads])
  async function send(event:React.FormEvent){
   event.preventDefault();const prompt=question.trim();if(!prompt||!agents[0]||state.status==='running')return
-  const runId=crypto.randomUUID();let current=initialState;setState(current);setLastQuestion(prompt);setQuestion('')
+  const runId=crypto.randomUUID(),assistantMessageId=crypto.randomUUID();let current=initialState;setState(current);setMessages(items=>[...items,{id:crypto.randomUUID(),role:'user',content:prompt},{id:assistantMessageId,role:'assistant',content:''}]);setQuestion('')
   try{
    const response=await api('/api/v1/agui',{method:'POST',headers:{Accept:'text/event-stream'},body:JSON.stringify({threadId,runId,state:{},messages:[{id:crypto.randomUUID(),role:'user',content:prompt}],tools:[],context:[],forwardedProps:{agentId:agents[0].id}})})
-   for await(const item of streamSse(response)){current=reduceEvent(current,item);setState({...current})}
+   for await(const item of streamSse(response)){current=reduceEvent(current,item);setState({...current});setMessages(items=>items.map(message=>message.id===assistantMessageId?{...message,content:current.text}:message))}
    await refresh()
   }catch(error){setState({...current,status:'error',error:error instanceof Error?error.message:'运行失败'})}
  }
- function newThread(){setThreadId(crypto.randomUUID());setQuestion('');setLastQuestion('');setState(initialState)}
+ function newThread(){setThreadId(crypto.randomUUID());setQuestion('');setMessages([]);setState(initialState)}
+ async function selectThread(id:string){
+  setThreadId(id);setQuestion('');setState(initialState)
+  try{const stored=await api(`/api/v1/me/threads/${encodeURIComponent(id)}/messages`).then(response=>response.json());setMessages(stored.map((message:{id:number;role:'user'|'assistant';content:string})=>({id:String(message.id),role:message.role,content:message.content})))}
+  catch(reason){setMessages([]);setThreadNotice(reason instanceof Error?reason.message:'加载会话失败')}
+ }
  function toggleThread(id:string){setSelectedThreads(current=>{const next=new Set(current);next.has(id)?next.delete(id):next.add(id);return next})}
  async function removeThreads(ids:string[]){
   if(!ids.length||!window.confirm(`确定删除 ${ids.length} 个会话及其全部运行记录吗？此操作不可撤销。`))return
@@ -70,7 +82,7 @@ function Workspace({user,logout}:{user:User;logout:()=>void}){
   {page==='chat'?<div className="workspace">
    <aside className="sessions"><div className="aside-title"><span>会话记录</span><button className="manage-button" onClick={()=>{setManaging(value=>!value);setSelectedThreads(new Set());setThreadNotice('')}}>{managing?'完成':'管理'}</button></div><button className="new-thread" onClick={newThread}>＋ 新建问诊</button>{managing&&threads.length>0&&<div className="thread-actions"><button onClick={()=>setSelectedThreads(selectedThreads.size===threads.length?new Set():new Set(threads.map(item=>item.id)))}>{selectedThreads.size===threads.length?'取消全选':'全选'}</button><button className="danger" disabled={!selectedThreads.size} onClick={()=>removeThreads([...selectedThreads])}>删除所选 ({selectedThreads.size})</button></div>}{threadNotice&&<p className="thread-notice" role="status">{threadNotice}</p>}<div className="thread-list">{threads.length?threads.map(item=><div className="thread-row" key={item.id}>{managing&&<input aria-label={`选择会话 ${item.title}`} type="checkbox" checked={selectedThreads.has(item.id)} onChange={()=>toggleThread(item.id)}/>}<button className={item.id===threadId?'thread active':'thread'} onClick={()=>setThreadId(item.id)}><span>{item.title}</span><small>{new Date(item.updatedAt).toLocaleDateString('zh-CN')}</small></button>{managing&&<button className="thread-delete" aria-label={`删除会话 ${item.title}`} title="删除此会话" onClick={()=>removeThreads([item.id])}>×</button>}</div>):<p className="empty-note">还没有历史会话</p>}</div></aside>
    <main className="chat-main"><div className="chat-heading"><div><p className="eyebrow">MEDICAL ASSISTANT</p><h1>医疗咨询</h1></div><span className="agent-pill"><i/> {AGENT_NAMES[activeAgent]??'正在加载 Agent'}</span></div>
-    <div className="conversation" aria-live="polite">{!lastQuestion&&!state.text?<Welcome onPick={setQuestion}/>:<><div className="message user-message"><span className="message-label">你</span><p>{lastQuestion}</p></div><div className="message assistant-message"><span className="assistant-icon">M</span><div><span className="message-label">MediX</span>{state.thinkingStatus&&<ThinkingPanel text={state.thinking} status={state.thinkingStatus}/>} {state.status==='running'&&!state.text?<LoadingAnswer/>:<AssistantAnswerText text={state.text}/>}</div></div></>}{state.error&&<p className="error error-card" role="alert">{state.error}</p>}</div>
+    <div className="conversation" aria-live="polite">{!messages.length?<Welcome onPick={setQuestion}/>:messages.map(message=>message.role==='user'?<div className="message user-message" key={message.id}><span className="message-label">你</span><p>{message.content}</p></div>:<div className="message assistant-message" key={message.id}><span className="assistant-icon">M</span><div><span className="message-label">MediX</span>{state.status==='running'&&message===messages.at(-1)&&state.thinkingStatus&&<ThinkingPanel text={state.thinking} status={state.thinkingStatus}/>} {state.status==='running'&&message===messages.at(-1)&&!message.content?<LoadingAnswer/>:<AssistantAnswerText text={message.content}/>}</div></div>)}{state.error&&<p className="error error-card" role="alert">{state.error}</p>}</div>
     <form className="composer" onSubmit={send}><textarea aria-label="医疗问题" placeholder="描述症状、持续时间，或询问健康知识…" maxLength={4000} value={question} onChange={event=>setQuestion(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();event.currentTarget.form?.requestSubmit()}}}/><div className="composer-footer"><span>Enter 发送 · Shift + Enter 换行</span><button className="send-button" disabled={state.status==='running'||!question.trim()}>{state.status==='running'?'处理中':'发送'}</button></div></form>
    </main>
    <TracePanel state={state}/>

@@ -1,0 +1,15 @@
+# Copy to src/main/resources/application-local.yml (ignored by Git) only on a private machine.
+# Professional Agent execution and final response polishing use DeepSeek.
+medix:
+  features:
+    live-llm: true
+spring:
+  ai:
+    openai:
+      api-key: "sk-1c3b78c17cd946299fb1767eaf4db08c"
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-v4-flash
+          temperature: 0.2
+          top-p: 0.9

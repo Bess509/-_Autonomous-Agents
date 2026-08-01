@@ -35,11 +35,15 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 import org.springframework.transaction.annotation.Transactional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @RestController
 @RequestMapping("/api/v1")
 public class AguiController {
+    private static final Logger log = LoggerFactory.getLogger(AguiController.class);
     public record ThreadView(String id, UUID ownerUserId, String title, Instant createdAt, Instant updatedAt) {}
+    public record ConversationMessageView(long id, String role, String content, Instant createdAt) {}
     public record ThreadDeleteRequest(List<String> threadIds) {}
     public record DeleteResult(int deleted) {}
 
@@ -48,20 +52,22 @@ public class AguiController {
     private final ObjectMapper mapper;
     private final JdbcTemplate jdbc;
     private final DeepSeekStreamingService deepSeek;
+    private final ConversationQueryPreprocessor queryPreprocessor;
 
     @Autowired
     public AguiController(PermissionService permissions, SwarmCoordinator coordinator, JdbcTemplate jdbc,
-                          DeepSeekStreamingService deepSeek) {
+                          DeepSeekStreamingService deepSeek, ConversationQueryPreprocessor queryPreprocessor) {
         this.permissions = permissions;
         this.coordinator = coordinator;
         this.mapper = new ObjectMapper();
         this.jdbc = jdbc;
         this.deepSeek = deepSeek;
+        this.queryPreprocessor = queryPreprocessor;
     }
 
     public AguiController(PermissionService permissions, SwarmCoordinator coordinator, JdbcTemplate jdbc) {
         this(permissions, coordinator, jdbc,
-                new DeepSeekStreamingService(false, "", "https://api.deepseek.com", "deepseek-v4-flash", new ObjectMapper()));
+                new DeepSeekStreamingService(false, "", "https://api.deepseek.com", "deepseek-v4-flash", new ObjectMapper()), null);
     }
 
     @PostMapping(value = "/agui", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -89,6 +95,8 @@ public class AguiController {
             if (raced != null) return sse(raced);
             throw new RunInProgress();
         }
+        saveConversationMessage(input.threadId(), "user", input.latestUserMessage());
+        log.info("[RUN] accepted runId={} threadId={} user={} question={}", input.runId(), input.threadId(), user.id(), compact(input.latestUserMessage()));
 
         String requested = input.forwardedProps() == null
                 ? "consultation_agent"
@@ -115,9 +123,20 @@ public class AguiController {
             emit(output, payload, sequence.event("STEP_STARTED", Map.of("stepName", "安全检查")));
             emit(output, payload, sequence.event("STEP_FINISHED", Map.of("stepName", "安全检查")));
             emit(output, payload, sequence.event("STEP_STARTED", Map.of("stepName", "多 Agent 分析")));
+            ConversationQueryPreprocessor.Result query = queryPreprocessor == null
+                    ? new ConversationQueryPreprocessor.Result(input.latestUserMessage(), "", false)
+                    : queryPreprocessor.rewrite(input.latestUserMessage(), recentMessages(input.threadId()));
+            Map<String, Object> requestContext = new LinkedHashMap<>();
+            requestContext.put("runId", input.runId());
+            requestContext.put("permission.capabilities", permissions.matrix());
+            requestContext.put("security.userId", user.id().toString());
+            requestContext.put("security.principal", user);
+            requestContext.put("rag.retrievalQuery", query.retrievalQuery());
+            requestContext.put("conversation.summary", query.conversationSummary());
+            requestContext.put("conversation.queryRewritten", query.rewritten());
+            log.info("[RUN] routing runId={} retrievalQuery={} rewritten={}", input.runId(), compact(query.retrievalQuery()), query.rewritten());
             SwarmResponse response = coordinator.processDetailed(new AgentRequest(input.latestUserMessage(), input.threadId(),
-                    Map.of("runId", input.runId(), "permission.capabilities", permissions.matrix(),
-                            "security.userId", user.id().toString(), "security.principal", user)), permissions.agents(user));
+                    requestContext), permissions.agents(user));
             emit(output, payload, sequence.event("STEP_FINISHED", Map.of("stepName", "多 Agent 分析")));
             String routeStep = "路由 · " + response.decision().reason();
             emit(output, payload, sequence.event("STEP_STARTED", Map.of("stepName", routeStep)));
@@ -137,6 +156,9 @@ public class AguiController {
                 emit(output, payload, sequence.event("STEP_FINISHED", Map.of("stepName", result.agentId())));
             }
             streamAnswer(output, payload, sequence, input, response);
+            saveConversationMessage(input.threadId(), "assistant", response.answer());
+            log.info("[RUN] complete runId={} route={} agents={} answer={}", input.runId(), response.decision().reason(),
+                    response.decision().requiredAgents(), compact(response.answer()));
             emit(output, payload, sequence.event("STATE_SNAPSHOT", Map.of("snapshot", Map.of(
                     "route", response.decision().reason(), "agents", response.decision().requiredAgents(),
                     "skills", response.agentResults().stream().flatMap(result -> result.skillCalls().stream()).distinct().toList()))));
@@ -144,9 +166,11 @@ public class AguiController {
                     "outcome", Map.of("type", "success"))));
             saveResult(input.runId(), "COMPLETED", payload.toString());
         } catch (SecurityException denied) {
+            log.warn("[RUN_ERROR] runId={} type=security code={}", input.runId(), denied.getMessage());
             emit(output, payload, sequence.event("RUN_ERROR", Map.of("message", "能力权限不足", "code", denied.getMessage())));
             saveResult(input.runId(), "DENIED", payload.toString());
         } catch (Exception failure) {
+            log.error("[RUN_ERROR] runId={} type={}", input.runId(), failure.getClass().getSimpleName(), failure);
             emit(output, payload, sequence.event("RUN_ERROR", Map.of("message", "运行失败，请稍后重试", "code", "RUN_FAILED")));
             saveResult(input.runId(), "FAILED", payload.toString());
         }
@@ -160,19 +184,34 @@ public class AguiController {
         emit(output, payload, sequence.event("TEXT_MESSAGE_START", Map.of("messageId", messageId, "role", "assistant")));
         if (deepSeek.enabled()) {
             boolean[] thinkingEnded = {false};
-            deepSeek.stream(input.latestUserMessage(), response.answer(), delta -> {
-                try {
-                    if (!delta.reasoning().isEmpty())
-                        emit(output, payload, sequence.event("THINKING_CONTENT", Map.of("messageId", thinkingId, "delta", delta.reasoning())));
-                    if (!delta.content().isEmpty()) {
-                        if (!thinkingEnded[0]) {
-                            emit(output, payload, sequence.event("THINKING_END", Map.of("messageId", thinkingId)));
-                            thinkingEnded[0] = true;
+            boolean[] contentStarted = {false};
+            try {
+                deepSeek.stream(input.latestUserMessage(), response.answer(), delta -> {
+                    try {
+                        if (!delta.reasoning().isEmpty())
+                            emit(output, payload, sequence.event("THINKING_CONTENT", Map.of("messageId", thinkingId, "delta", delta.reasoning())));
+                        if (!delta.content().isEmpty()) {
+                            if (!thinkingEnded[0]) {
+                                emit(output, payload, sequence.event("THINKING_END", Map.of("messageId", thinkingId)));
+                                thinkingEnded[0] = true;
+                            }
+                            contentStarted[0] = true;
+                            emit(output, payload, sequence.event("TEXT_MESSAGE_CONTENT", Map.of("messageId", messageId, "delta", delta.content())));
                         }
-                        emit(output, payload, sequence.event("TEXT_MESSAGE_CONTENT", Map.of("messageId", messageId, "delta", delta.content())));
+                    } catch (IOException failure) { throw new StreamWriteFailure(failure); }
+                });
+            } catch (Exception failure) {
+                log.warn("[FALLBACK] component=FINAL_STREAM reason=deepseek_stream_failure type={} contentStarted={}",
+                        failure.getClass().getSimpleName(), contentStarted[0]);
+                if (!contentStarted[0]) {
+                    if (!thinkingEnded[0]) {
+                        emit(output, payload, sequence.event("THINKING_END", Map.of("messageId", thinkingId)));
+                        thinkingEnded[0] = true;
                     }
-                } catch (IOException failure) { throw new StreamWriteFailure(failure); }
-            });
+                    for (String part : chunks(response.answer(), 80))
+                        emit(output, payload, sequence.event("TEXT_MESSAGE_CONTENT", Map.of("messageId", messageId, "delta", part)));
+                }
+            }
             if (!thinkingEnded[0]) emit(output, payload, sequence.event("THINKING_END", Map.of("messageId", thinkingId)));
         } else {
             emit(output, payload, sequence.event("THINKING_CONTENT", Map.of("messageId", thinkingId,
@@ -200,6 +239,19 @@ public class AguiController {
                 SELECT id, owner_user_id, title, created_at, updated_at
                 FROM conversation_threads WHERE id = ? AND owner_user_id = ?
                 """, (rs, row) -> thread(rs), id, owner).stream().findFirst().orElseThrow(() -> new Forbidden("THREAD_NOT_OWNED"));
+    }
+
+    @GetMapping("/me/threads/{id}/messages")
+    public List<ConversationMessageView> messages(@PathVariable String id, Authentication authentication) {
+        UUID owner = ((AppPrincipal) authentication.getPrincipal()).id();
+        Boolean owned = jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM conversation_threads WHERE id = ? AND owner_user_id = ?)",
+                Boolean.class, id, owner);
+        if (!Boolean.TRUE.equals(owned)) throw new Forbidden("THREAD_NOT_OWNED");
+        return jdbc.query("""
+                SELECT id, role, content, created_at FROM conversation_messages
+                WHERE thread_id = ? ORDER BY created_at, id
+                """, (rs, row) -> new ConversationMessageView(rs.getLong("id"), rs.getString("role"),
+                rs.getString("content"), rs.getTimestamp("created_at").toInstant()), id);
     }
 
     @DeleteMapping("/me/threads/{id}")
@@ -280,6 +332,21 @@ public class AguiController {
         }
     }
 
+    private List<RunAgentInput.Message> recentMessages(String threadId) {
+        List<RunAgentInput.Message> newestFirst = jdbc.query("""
+                SELECT role, content FROM conversation_messages
+                WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT 10
+                """, (rs, row) -> new RunAgentInput.Message(null, rs.getString("role"), rs.getString("content")), threadId);
+        java.util.Collections.reverse(newestFirst);
+        return newestFirst;
+    }
+
+    private void saveConversationMessage(String threadId, String role, String content) {
+        if (content == null || content.isBlank()) return;
+        jdbc.update("INSERT INTO conversation_messages(thread_id, role, content) VALUES (?, ?, ?)", threadId, role, content.trim());
+        jdbc.update("UPDATE conversation_threads SET updated_at = now() WHERE id = ?", threadId);
+    }
+
     private ThreadView thread(java.sql.ResultSet rs) throws java.sql.SQLException {
         return new ThreadView(rs.getString("id"), rs.getObject("owner_user_id", UUID.class), rs.getString("title"),
                 rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant());
@@ -314,6 +381,11 @@ public class AguiController {
         if (input == null || blank(input.threadId()) || blank(input.runId()) || blank(input.latestUserMessage())
                 || input.threadId().length() > 120 || input.runId().length() > 120
                 || input.latestUserMessage().length() > 4000) throw new Invalid();
+    }
+
+    private String compact(String value) {
+        String normalized = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 240 ? normalized : normalized.substring(0, 240) + "…";
     }
 
     private boolean blank(String value) {

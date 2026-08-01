@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -74,7 +75,6 @@ public final class SpringAiAgentScopeChatModel extends ChatModelBase {
         extraBody.put("tools", providerTools(publishedTools));
         OpenAiChatOptions chatOptions = defaults.mutate()
                 .toolCallbacks(List.of())
-                .temperature(null)
                 .extraBody(extraBody)
                 .build();
         if (!expectedModel.equals(chatOptions.getModel())) throw new IllegalStateException("LLM_MODEL_MISMATCH");
@@ -120,13 +120,19 @@ public final class SpringAiAgentScopeChatModel extends ChatModelBase {
         AssistantMessage output = generation.getOutput();
         List<ContentBlock> blocks = new ArrayList<>();
         if (output.getText() != null && !output.getText().isBlank()) blocks.add(TextBlock.builder().text(output.getText()).build());
-        output.getToolCalls().forEach(call -> {
+        Set<String> seenCalls = new HashSet<>();
+        for (AssistantMessage.ToolCall call : output.getToolCalls()) {
             validateToolCall(call, allowedTools);
             String id = requireToolCallId(call.id());
+            String key = call.name() + "\u0000" + call.arguments();
+            if (!seenCalls.add(key)) {
+                log.warn("[DEDUP] component=MODEL_TOOL_CALL tool={} reason=duplicate_calls_in_provider_response", call.name());
+                continue;
+            }
             log.info("LLM_TOOL_CORRELATION phase=provider_call id_sha256={} tool={}", sha256(id), call.name());
             blocks.add(ToolUseBlock.builder().id(id)
                     .name(call.name()).content(call.arguments()).build());
-        });
+        }
         if (blocks.isEmpty()) throw new IllegalStateException("LLM_INVALID_RESPONSE");
         org.springframework.ai.chat.metadata.Usage usage = response.getMetadata().getUsage();
         return ChatResponse.builder()

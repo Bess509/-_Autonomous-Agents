@@ -8,9 +8,12 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Component
 public class LeadAgent {
+    private static final Logger log = LoggerFactory.getLogger(LeadAgent.class);
     private static final Map<String, String> WORKER_CAPABILITIES = Map.of(
             "consultation_agent", "健康咨询、常见病科普、生活方式建议、初步风险提示",
             "diagnostic_agent", "复杂症状分析、风险分层、鉴别诊断参考",
@@ -41,6 +44,7 @@ public class LeadAgent {
             if (!subtasks.isEmpty()) return subtasks;
         } catch (RuntimeException ignored) {
             // A deterministic safe fallback keeps the original user facts intact.
+            log.warn("[FALLBACK] component=LEAD_AGENT reason=decomposition_parse_or_model_failure");
         }
         return List.of(fallbackSubtask(question));
     }
@@ -52,6 +56,7 @@ public class LeadAgent {
                 if (answer != null && !answer.isBlank()) return answer.trim();
             } catch (RuntimeException ignored) {
                 // Never expose provider details; retain completed evidence in the deterministic fallback below.
+                log.warn("[FALLBACK] component=LEAD_AGENT reason=synthesis_model_failure");
             }
         }
         String value = question == null ? "" : question;
@@ -63,10 +68,49 @@ public class LeadAgent {
             return "【证据摘要】风险核对提示当前描述含高危信号。\n\n"
                     + "【综合建议】请立即就医或拨打 120，不要等待在线回复；补充症状开始时间和伴随表现只能用于急诊沟通，不能延误救治。";
         }
+        String ragEvidence = successfulKnowledgeEvidence(results);
+        if (!ragEvidence.isBlank()) {
+            return composeOfflineRagAnswer(value, ragEvidence);
+        }
         long completed = results == null ? 0 : results.stream().filter(result -> result.answer() != null).count();
         return "【证据摘要】已完成 " + completed + " 项授权医疗能力的内部核对，原始工具输出不会直接作为答复展示。\n\n"
                 + "【综合建议】目前信息仍不足以作出诊断。请补充症状开始时间、变化趋势、伴随表现和既往病史；"
                 + "在没有紧急信号时可先记录变化，并根据持续或加重情况到正规医疗机构评估。";
+    }
+
+    /** Offline synthesis path: preserve reviewed RAG evidence instead of replacing it with a generic fallback. */
+    private String successfulKnowledgeEvidence(List<AgentResult> results) {
+        if (results == null) return "";
+        return results.stream()
+                .filter(result -> result != null && result.skillCalls() != null
+                        && result.skillCalls().contains("search_knowledge"))
+                .map(AgentResult::answer)
+                .filter(answer -> answer != null && !answer.isBlank())
+                .map(answer -> answer.replaceFirst("^\\s*内部证据贡献[\\uff1a:]\\s*", ""))
+                .filter(answer -> !answer.isBlank())
+                .findFirst().orElse("");
+    }
+
+    private String composeOfflineRagAnswer(String question, String evidence) {
+        String reference = primaryKnowledgeAnswer(evidence);
+        if (reference.length() > 1200) reference = reference.substring(0, 1200).trim() + "…";
+        reference = reference.replaceAll("[。；，、\\s]+$", "");
+        String prevention = "请结合自身年龄、症状持续时间、严重程度、既往疾病、过敏史和正在使用的药物谨慎判断，避免自行使用处方药或偏方。";
+        String care = question != null && question.contains("新生儿") && question.contains("黄疸")
+                ? "如黄染明显加重，或宝宝出现嗜睡、吃奶差、发热等情况，应尽快带宝宝到儿科或新生儿科评估。"
+                : "如症状持续、加重或出现明显不适，请及时到正规医疗机构评估。";
+        return "[[RAG_SINGLE_PARAGRAPH]]根据高置信度医学知识库，" + reference + "。" + prevention + care;
+    }
+
+    private String primaryKnowledgeAnswer(String evidence) {
+        String source = evidence.replaceFirst("^\\s*知识库摘要[\\uff1a:]\\s*", "").trim();
+        if (source.startsWith("-")) {
+            int titleEnd = source.indexOf(":");
+            if (titleEnd >= 0) source = source.substring(titleEnd + 1).trim();
+            int nextHit = source.indexOf("\n-");
+            if (nextHit >= 0) source = source.substring(0, nextHit).trim();
+        }
+        return source.replaceAll("\\s+", " ").trim();
     }
 
     private String buildSynthesisPrompt(String question, List<AgentResult> results) {

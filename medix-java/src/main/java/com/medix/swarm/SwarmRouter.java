@@ -13,9 +13,12 @@ import java.util.Map;
 import java.util.Objects;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Component
 public class SwarmRouter {
+    private static final Logger log = LoggerFactory.getLogger(SwarmRouter.class);
     private static final Map<IntentLabel, String> AGENTS = new EnumMap<>(IntentLabel.class);
 
     static {
@@ -57,6 +60,8 @@ public class SwarmRouter {
             NluResult result = classifier.classify(question);
             return routeNlu(question, result);
         } catch (RuntimeException exception) {
+            log.warn("[FALLBACK] component=ROUTER reason=nlu_unavailable type={} message={}",
+                    exception.getClass().getSimpleName(), safeMessage(exception));
             return new RouteDecision(RouteMode.SWARM, "lead_agent",
                     List.of("consultation_agent", "diagnostic_agent", "research_agent"),
                     "nlu_unavailable", true, Map.of());
@@ -79,13 +84,11 @@ public class SwarmRouter {
             return symptomRoute(reason, observable);
         }
         double top1 = ranked.getFirst().getValue();
-        double top2 = ranked.size() > 1 ? ranked.get(1).getValue() : 0.0;
-        boolean crossAgentAmbiguity = ranked.size() > 1
-                && !Objects.equals(AGENTS.get(ranked.getFirst().getKey()), AGENTS.get(ranked.get(1).getKey()))
-                && top2 >= threshold(ranked.get(1).getKey())
-                && top1 - top2 < properties.ambiguityMargin();
-        if (top1 < properties.confidenceThreshold() || crossAgentAmbiguity) {
-            return fallback("nlu_low_confidence_or_ambiguous", observable);
+        // High-confidence labels can legitimately belong to different specialist agents.
+        // They are complementary evidence requests, not an ambiguity to be collapsed by
+        // the LeadAgent. Dispatch them together and let the LeadAgent synthesize results.
+        if (top1 < properties.confidenceThreshold()) {
+            return fallback("nlu_low_confidence", observable);
         }
         List<IntentLabel> selected = ranked.stream()
                 .filter(entry -> entry.getValue() >= threshold(entry.getKey()))
@@ -97,9 +100,11 @@ public class SwarmRouter {
             return fallback("nlu_no_label_above_threshold", observable);
         }
         if (agents.size() == 1) {
+            log.info("[ROUTER] decision=nlu_high_confidence_single agents={} probabilities={}", agents, observable);
             return new RouteDecision(RouteMode.SINGLE_AGENT, agents.getFirst(), agents,
                     "nlu_high_confidence_single", false, observable);
         }
+        log.info("[ROUTER] decision=nlu_high_confidence_multi agents={} probabilities={}", agents, observable);
         return new RouteDecision(RouteMode.SWARM, agents.getFirst(), agents,
                 "nlu_high_confidence_multi", false, observable);
     }
@@ -130,7 +135,14 @@ public class SwarmRouter {
     }
 
     private RouteDecision fallback(String reason, Map<String, Double> probabilities) {
+        log.warn("[FALLBACK] component=ROUTER reason={} probabilities={}", reason, probabilities);
         return new RouteDecision(RouteMode.SWARM, "lead_agent",
                 List.of("consultation_agent", "diagnostic_agent", "research_agent"), reason, true, probabilities);
+    }
+
+    private String safeMessage(Exception exception) {
+        String message = exception.getMessage();
+        String normalized = message == null ? "" : message.replaceAll("\\s+", " ");
+        return normalized.substring(0, Math.min(180, normalized.length()));
     }
 }

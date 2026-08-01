@@ -11,9 +11,12 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Component
 public class SharedContextStore {
+    private static final Logger log = LoggerFactory.getLogger(SharedContextStore.class);
     private static final String KEY_PREFIX = "medix:swarm:";
 
     private final Map<String, Map<String, String>> local = new ConcurrentHashMap<>();
@@ -54,6 +57,7 @@ public class SharedContextStore {
             redisTemplate.get().opsForHash().put(redisKey, key, value);
             redisTemplate.get().expire(redisKey, redisContextTtl);
         } catch (RuntimeException ignored) {
+            log.warn("[FALLBACK] component=SHARED_CONTEXT reason=redis_write_unavailable session={}", sessionId);
             local.computeIfAbsent(sessionId, current -> new ConcurrentHashMap<>()).put("redis.status", "unavailable");
         }
     }
@@ -67,6 +71,7 @@ public class SharedContextStore {
             redisTemplate.get().opsForHash().entries(redisKey(sessionId))
                     .forEach((key, value) -> entries.put(String.valueOf(key), String.valueOf(value)));
         } catch (RuntimeException ignored) {
+            log.warn("[FALLBACK] component=SHARED_CONTEXT reason=redis_read_unavailable session={}", sessionId);
             entries.put("redis.status", "unavailable");
         }
         return entries;

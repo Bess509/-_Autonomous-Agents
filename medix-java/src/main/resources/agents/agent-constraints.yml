@@ -2,10 +2,10 @@ medix:
   harness:
     agents:
       consultation_agent:
-        allowedSkills: [search_knowledge, recommend_lifestyle, assess_risk]
+        allowedSkills: [search_knowledge, recommend_lifestyle, assess_risk, safe_medical_guidance]
         forbiddenActions: [diagnose_disease, prescribe_medication, guarantee_cure]
       diagnostic_agent:
-        allowedSkills: [assess_risk, analyze_symptoms, disease_code]
+        allowedSkills: [assess_risk, analyze_symptoms, disease_code, safe_medical_guidance]
         forbiddenActions: [give_definitive_diagnosis, suggest_self_treatment]
       research_agent:
         allowedSkills: [clinical_guideline, deep_research]

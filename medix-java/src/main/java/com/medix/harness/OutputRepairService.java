@@ -7,7 +7,9 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class OutputRepairService {
+    private static final String RAG_SINGLE_PARAGRAPH = "[[RAG_SINGLE_PARAGRAPH]]";
     private static final String DISCLAIMER = "\n\n【免责声明】以上信息仅供学习和参考，不能替代专业医生的诊断和治疗。如有不适或疑问，请及时就医。";
+    private static final String INLINE_DISCLAIMER = "以上信息仅供学习和参考，不能替代专业医生的诊断和治疗。";
     private static final String EMERGENCY = "【重要提醒】你描述的症状可能提示严重风险，建议立即就医或拨打 120，不要延误急救。\n\n";
     private static final List<String> HIGH_RISK = List.of("胸痛", "呼吸困难", "昏厥", "意识不清", "剧烈头痛", "偏瘫");
     private static final Pattern DISCLAIMER_BLOCK = Pattern.compile("(?s)\\n*【免责声明】[^【]*");
@@ -19,6 +21,8 @@ public class OutputRepairService {
 
     public String repair(String output, String userInput) {
         String repaired = output == null ? "" : output;
+        boolean inlineRagAnswer = repaired.startsWith(RAG_SINGLE_PARAGRAPH);
+        if (inlineRagAnswer) repaired = repaired.substring(RAG_SINGLE_PARAGRAPH.length());
         repaired = DISCLAIMER_BLOCK.matcher(repaired).replaceAll("").trim();
         repaired = EMERGENCY_BLOCK.matcher(repaired).replaceAll("").trim();
         String riskSource = userInput == null ? "" : userInput;
@@ -28,7 +32,7 @@ public class OutputRepairService {
         if (HIGH_RISK.stream().anyMatch(signal -> NegationAwareSignalMatcher.containsNonNegated(riskSource, signal))) {
             repaired = EMERGENCY + repaired;
         }
-        repaired = repaired + DISCLAIMER;
+        repaired = repaired + (inlineRagAnswer ? INLINE_DISCLAIMER : DISCLAIMER);
         return repaired.replace("确诊为", "可能存在").replace("肯定是", "可能是");
     }
 

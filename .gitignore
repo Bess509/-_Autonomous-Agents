@@ -4,6 +4,8 @@ target/
 .vscode/
 *.iml
 *.log
+application-local.yml
+**/application-local.yml
 medix-java/windows-launcher/logs/
 medix-java/windows-launcher/state/
 **/node_modules/

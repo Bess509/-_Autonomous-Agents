@@ -7,6 +7,7 @@ import com.medix.agent.AgentRuntimePort;
 import com.medix.harness.HarnessValidator;
 import com.medix.harness.OutputRepairService;
 import com.medix.skill.SkillRegistry;
+import com.medix.skill.SkillResult;
 import com.medix.permission.PermissionService;
 import com.medix.nlu.EmergencyRiskDetector;
 import io.agentscope.core.ReActAgent;
@@ -23,17 +24,21 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Component
 public class AgentScopeRuntimeAdapter implements AgentRuntimePort {
+    private static final Logger log = LoggerFactory.getLogger(AgentScopeRuntimeAdapter.class);
     private static final Set<String> DIAGNOSTIC_CAPABILITY_ALLOWLIST = Set.of(
             "analyze_symptoms", "assess_risk", "search_knowledge", "clinical_guideline",
-            "recommend_lifestyle", "disease_code", "deep_research");
+            "recommend_lifestyle", "disease_code", "deep_research", "safe_medical_guidance");
     private final SkillRegistry skills;
     private final HarnessValidator harness;
     private final OutputRepairService safety;
     private final Model model;
     private final int maxIterations;
+    private final int maxSkillCalls;
     private final Duration timeout;
     private final PermissionService permissions;
     private final EmergencyRiskDetector emergency = new EmergencyRiskDetector();
@@ -43,21 +48,30 @@ public class AgentScopeRuntimeAdapter implements AgentRuntimePort {
                                     @Value("${medix.features.live-llm:false}") boolean live,
                                     @Value("${spring.ai.openai.chat.options.model:}") String configuredModel,
                                     @Value("${medix.agent.max-iterations:5}") int maxIterations,
+                                    @Value("${medix.agent.max-skill-calls:3}") int maxSkillCalls,
                                     @Value("${medix.agent.single-agent-timeout:15s}") Duration timeout) {
         this.skills = skills;
         this.harness = harness;
         this.safety = safety;
         this.maxIterations = maxIterations;
+        this.maxSkillCalls = Math.max(1, maxSkillCalls);
         this.timeout = timeout;
         this.permissions = permissions;
         ChatModel springModel = chatModel.getIfAvailable();
+        // Professional agents must use the configured DeepSeek-compatible model. There is no
+        // synthetic answer fallback: a missing configuration fails safely at invocation time.
         this.model = live && springModel != null
                 ? new SpringAiAgentScopeChatModel(springModel, new ObjectMapper(), configuredModel)
-                : new FakeAgentScopeChatModel();
+                : null;
     }
 
     @Override
     public AgentResult run(String agentId, AgentRequest request) {
+        if (model == null) {
+            throw new IllegalStateException("LLM_DEEPSEEK_NOT_CONFIGURED");
+        }
+        log.info("[AGENT] start agent={} session={} question={} retrievalQuery={}", agentId, request.sessionId(),
+                compact(request.question()), compact(String.valueOf(request.context().getOrDefault("rag.retrievalQuery", ""))));
         if (emergency.isEmergency(request.question())) {
             String emergencyAnswer = safety.repair(
                     "检测到可能危及生命的急症信号。请立即拨打 120 或前往急诊，不要等待在线回复，"
@@ -73,7 +87,7 @@ public class AgentScopeRuntimeAdapter implements AgentRuntimePort {
         }
         Toolkit toolkit = new Toolkit();
         MedicalAgentScopeTools medicalTools = new MedicalAgentScopeTools(
-                agentId, request.sessionId(), request.context(), skills, permissions);
+                agentId, request.sessionId(), request.context(), skills, permissions, maxSkillCalls);
         toolkit.registerTool(medicalTools);
         List<String> allowed = harness.visibleSkillMetadata(agentId, skills.metadata()).keySet().stream().toList();
         toolkit.getToolSchemas().stream().map(schema -> schema.getName()).filter(name -> !allowed.contains(name)).toList()
@@ -84,13 +98,19 @@ public class AgentScopeRuntimeAdapter implements AgentRuntimePort {
         else toolkit.getToolSchemas().stream().map(s -> s.getName())
                 .filter(name -> !(permissionMatrix.get(agentId) instanceof java.util.Collection<?> c && c.contains(name)))
                 .toList().forEach(toolkit::removeTool);
+        log.info("[AGENT_TOOLS] agent={} visible={}", agentId,
+                toolkit.getToolSchemas().stream().map(schema -> schema.getName()).sorted().toList());
 
         ReActAgent agent = ReActAgent.builder().name(agentId).model(model).toolkit(toolkit)
                 .sysPrompt("You are MediX, a cautious medical information assistant. "
                         + "For identity or capability questions, introduce yourself directly without calling a tool. "
                         + "For medical questions, use only registered tools when evidence is needed. "
                         + "After any tool result, answer the original question using that evidence in one final response. "
-                        + "Never expose hidden reasoning, diagnose with certainty, invent evidence, or prescribe treatment.")
+                        + "When search_knowledge reports RELIABLE_RAG_EVIDENCE, use that evidence immediately and never call search_knowledge again for this question. "
+                        + "If a tool reports a call limit, stop calling tools and write the final response from evidence already received. "
+                        + "Only call retrieved material evidence when the tool reports RELIABLE_RAG_EVIDENCE. "
+                        + "If it reports RAG_NO_RELIABLE_EVIDENCE, call safe_medical_guidance, ask focused follow-up questions when information is missing, "
+                        + "and otherwise give only conservative general advice. Never expose hidden reasoning, diagnose with certainty, invent evidence, or prescribe treatment.")
                 .maxIters(maxIterations).build();
         String userId = String.valueOf(request.context().getOrDefault("security.userId", "anonymous"));
         RuntimeContext runtime = RuntimeContext.builder().userId(userId).sessionId(request.sessionId()).build();
@@ -98,10 +118,17 @@ public class AgentScopeRuntimeAdapter implements AgentRuntimePort {
         try {
             result = agent.call(request.question(), runtime).block(timeout);
         } catch (RuntimeException failure) {
+            if (medicalTools.reliableEvidence() != null) {
+                SkillResult evidence = medicalTools.reliableEvidence();
+                log.warn("[FALLBACK] component=AGENT agent={} reason=runtime_failure_using_verified_rag skills={} cause={}",
+                        agentId, medicalTools.invokedCapabilities(), stableFailureCode(failure));
+                return new AgentResult(agentId, evidence.content(), maxIterations, medicalTools.invokedCapabilities());
+            }
             throw diagnosticFailure(failure, medicalTools.invokedCapabilities());
         }
         if (result == null) throw new IllegalStateException("AgentScope returned no result");
         String answer = result.getTextContent();
+        log.info("[AGENT] complete agent={} skills={} answer={}", agentId, medicalTools.invokedCapabilities(), compact(answer));
         return new AgentResult(agentId, answer, maxIterations, medicalTools.invokedCapabilities());
     }
 
@@ -129,6 +156,11 @@ public class AgentScopeRuntimeAdapter implements AgentRuntimePort {
             if (message != null && message.matches("LLM_[A-Z_]+")) return message;
         }
         return "LLM_AGENT_SCOPE_RUNTIME";
+    }
+
+    private String compact(String value) {
+        String normalized = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 240 ? normalized : normalized.substring(0, 240) + "…";
     }
 
     private boolean isIdentityQuestion(String value) {

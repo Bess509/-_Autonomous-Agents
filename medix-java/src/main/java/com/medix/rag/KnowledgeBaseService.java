@@ -18,9 +18,13 @@ import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import com.medix.rag.entity.MedicalEntityExtractor;
 
 @Service
 public class KnowledgeBaseService {
+    private static final Logger log = LoggerFactory.getLogger(KnowledgeBaseService.class);
     private static final List<String> MEDICAL_TERMS = List.of(
             "胸痛", "呼吸困难", "高血压", "发热", "头痛", "昏厥", "糖尿病", "指南", "证据", "生活方式"
     );
@@ -28,14 +32,27 @@ public class KnowledgeBaseService {
     private final ResourcePatternResolver resourceResolver;
     private final RerankerClient rerankerClient;
     private final VectorStore vectorStore;
+    private final boolean medicalRagEnabled;
+    private final MedicalRagEmbeddingClient medicalEmbeddings;
+    private final MedicalRagRepository medicalRagRepository;
+    private final MedicalEntityExtractor entityExtractor;
+    private final MedicalRagReranker medicalRagReranker;
     private final List<Document> documents = new CopyOnWriteArrayList<>();
 
     public KnowledgeBaseService(ResourcePatternResolver resourceResolver, RerankerClient rerankerClient,
                                 ObjectProvider<VectorStore> vectorStoreProvider,
-                                @Value("${medix.features.vector-store:false}") boolean vectorEnabled) {
+                                @Value("${medix.features.vector-store:false}") boolean vectorEnabled,
+                                @Value("${medix.rag.enabled:false}") boolean medicalRagEnabled,
+                                MedicalRagEmbeddingClient medicalEmbeddings, MedicalRagRepository medicalRagRepository,
+                                MedicalEntityExtractor entityExtractor, MedicalRagReranker medicalRagReranker) {
         this.resourceResolver = resourceResolver;
         this.rerankerClient = rerankerClient;
         this.vectorStore = vectorEnabled ? vectorStoreProvider.getIfAvailable() : null;
+        this.medicalRagEnabled = medicalRagEnabled;
+        this.medicalEmbeddings = medicalEmbeddings;
+        this.medicalRagRepository = medicalRagRepository;
+        this.entityExtractor = entityExtractor;
+        this.medicalRagReranker = medicalRagReranker;
     }
 
     @PostConstruct
@@ -48,6 +65,15 @@ public class KnowledgeBaseService {
     }
 
     public List<KnowledgeSnippet> retrieve(String query, int limit) {
+        if (medicalRagEnabled) {
+            List<MedicalRagRecord> candidates = medicalRagRepository.search(
+                    medicalEmbeddings.embedQuery(query), Math.max(limit * 4, 20));
+            var entities = entityExtractor.extract(query);
+            List<KnowledgeSnippet> results = medicalRagReranker.rerank(candidates, entities, limit);
+            log.info("[RAG] query={} candidates={} entityTags={} reliableHits={}", compact(query), candidates.size(),
+                    entities.entityTags(), results.size());
+            return results;
+        }
         List<Document> candidates = vectorStore == null
                 ? documents
                 : vectorStore.similaritySearch(SearchRequest.builder().query(query).topK(Math.max(limit * 3, limit)).build());
@@ -135,5 +161,10 @@ public class KnowledgeBaseService {
             chunks.add(text.substring(start, Math.min(text.length(), start + maxChars)));
         }
         return chunks;
+    }
+
+    private String compact(String value) {
+        String normalized = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 180 ? normalized : normalized.substring(0, 180) + "…";
     }
 }

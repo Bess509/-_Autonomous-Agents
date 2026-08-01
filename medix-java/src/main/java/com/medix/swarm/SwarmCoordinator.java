@@ -18,9 +18,12 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Component
 public class SwarmCoordinator {
+    private static final Logger log = LoggerFactory.getLogger(SwarmCoordinator.class);
     private final SwarmRouter router;
     private final ConsultationAgent consultationAgent;
     private final DiagnosticAgent diagnosticAgent;
@@ -122,6 +125,8 @@ public class SwarmCoordinator {
                     sharedContextStore.entries(request.sessionId()));
         }
         subtasks.forEach(subtask -> requireAllowed(subtask.assignedAgent(), allowedAgents));
+        log.info("[SWARM] mode=parallel agents={} reason={}",
+                subtasks.stream().map(SwarmSubtask::assignedAgent).distinct().toList(), decision.reason());
         List<CompletableFuture<AgentResult>> futures = subtasks.stream()
                 .map(subtask -> CompletableFuture.supplyAsync(() -> runSubtask(executionRequest, subtask)))
                 .toList();
@@ -130,6 +135,8 @@ public class SwarmCoordinator {
             results.add(future.join());
         }
         String answer = synthesize(request.question(), results);
+        log.info("[SWARM] mode=parallel_synthesized contributors={}",
+                results.stream().map(AgentResult::agentId).toList());
         sharedContextStore.put(request.sessionId(), "response.synthesizerInvocations", "1");
         sharedContextStore.put(request.sessionId(), "lead_agent.status", "synthesized");
         return new SwarmResponse(decision, outputSafety.repair(answer, request.question()), results,
@@ -190,6 +197,8 @@ public class SwarmCoordinator {
         } catch (SecurityException denied) {
             throw denied;
         } catch (RuntimeException exception) {
+            log.warn("[FALLBACK] component=AGENT agent={} reason=execution_failure type={} code={}", agent.agentId(),
+                    exception.getClass().getSimpleName(), safeErrorCode(exception));
             sharedContextStore.put(request.sessionId(), agent.agentId() + ".status", "failed");
             sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".status", "failed");
             sharedContextStore.put(request.sessionId(), "subtask." + assignedSubtask.id() + ".error", safeErrorCode(exception));
@@ -271,6 +280,7 @@ public class SwarmCoordinator {
     }
 
     private AgentResult degradedResult(String agentId) {
+        log.warn("[FALLBACK] component=AGENT agent={} reason=degraded_result", agentId);
         return new AgentResult(
                 agentId,
                 agentId + " 暂时无法完成该子任务，系统将基于其他可用信息继续给出安全建议。",
